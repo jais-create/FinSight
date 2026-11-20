@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ShieldAlert,
@@ -32,6 +32,7 @@ export const IntelligencePage: React.FC = () => {
     openClientProfile,
     openCopilotWithPrompt,
     setActiveSection,
+    addToast,
   } = usePractice();
 
   const [tab, setTab] = useState<IntelTab>('anomalies');
@@ -39,12 +40,18 @@ export const IntelligencePage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('All');
 
   // New reconciliation composer state
-  const [recClientId, setRecClientId] = useState(clients[0]?.id || 'cli-1');
+  const [recClientId, setRecClientId] = useState(clients[0]?.id || '');
   const [recMetric, setRecMetric] = useState('');
   const [recSourceA, setRecSourceA] = useState('Purchase Invoice Batch');
   const [recValA, setRecValA] = useState('');
   const [recSourceB, setRecSourceB] = useState('Purchase Register / GSTR-2B');
   const [recValB, setRecValB] = useState('');
+
+  useEffect(() => {
+    if (!recClientId || !clients.some((c) => c.id === recClientId)) {
+      setRecClientId(clients[0]?.id || '');
+    }
+  }, [clients, recClientId]);
 
   const filteredAnomalies = useMemo(() => {
     return anomalies.filter((a) => {
@@ -108,6 +115,10 @@ export const IntelligencePage: React.FC = () => {
 
   const handleRunComparison = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!recClientId) {
+      addToast('Client required', 'Please onboard a client first before running reconciliation.', 'warning');
+      return;
+    }
     if (!recMetric.trim() || !recValA.trim() || !recValB.trim()) return;
 
     const numA = Number(recValA.replace(/[^0-9.-]/g, ''));

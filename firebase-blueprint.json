@@ -1,0 +1,560 @@
+{
+  "entities": {
+    "UserPublic": {
+      "title": "User Public Profile",
+      "description": "Non-PII public profile for an authenticated FinSight user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["Partner", "Senior CA", "Audit Executive", "Tax Associate"] },
+        "department": { "type": "string", "maxLength": 100 },
+        "avatarInitials": { "type": "string", "minLength": 1, "maxLength": 4 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "role", "department", "avatarInitials", "active", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "User Private PII",
+      "description": "Isolated personally identifiable information for a user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "phone", "createdAt", "updatedAt"]
+    },
+    "FirmWorkspace": {
+      "title": "Firm Workspace & Settings",
+      "description": "Master firm configuration, enabled compliance/document categories, notification preferences, and role permission matrix.",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "firmName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "tagline": { "type": "string", "maxLength": 200 },
+        "address": { "type": "string", "maxLength": 300 },
+        "city": { "type": "string", "maxLength": 80 },
+        "state": { "type": "string", "maxLength": 80 },
+        "pinCode": { "type": "string", "maxLength": 20 },
+        "icaiRegNo": { "type": "string", "maxLength": 40 },
+        "gstin": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "defaultFinancialYear": { "type": "string", "enum": ["FY 2026-27", "FY 2025-26", "FY 2024-25"] },
+        "availableFinancialYears": { "type": "array" },
+        "enabledComplianceCategories": { "type": "array" },
+        "enabledDocumentCategories": { "type": "array" },
+        "notifications": { "type": "object" },
+        "preferences": { "type": "object" },
+        "permissions": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerUid",
+        "firmName",
+        "tagline",
+        "address",
+        "city",
+        "state",
+        "pinCode",
+        "icaiRegNo",
+        "gstin",
+        "email",
+        "phone",
+        "defaultFinancialYear",
+        "availableFinancialYears",
+        "enabledComplianceCategories",
+        "enabledDocumentCategories",
+        "notifications",
+        "preferences",
+        "permissions",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Employee": {
+      "title": "CA Firm Employee",
+      "description": "Staff member profile in the CA firm workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["Partner", "Senior CA", "Audit Executive", "Tax Associate"] },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "department": { "type": "string", "maxLength": 100 },
+        "active": { "type": "boolean" },
+        "avatarInitials": { "type": "string", "minLength": 1, "maxLength": 4 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "name", "role", "email", "phone", "department", "active", "avatarInitials", "createdAt", "updatedAt"]
+    },
+    "Client": {
+      "title": "Client Entity",
+      "description": "Individual or business client managed by the CA firm.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientCode": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "type": { "type": "string", "enum": ["Individual", "Private Limited", "Partnership", "LLP", "Proprietorship"] },
+        "dobOrIncDate": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "address": { "type": "string", "maxLength": 300 },
+        "city": { "type": "string", "maxLength": 80 },
+        "state": { "type": "string", "maxLength": 80 },
+        "pinCode": { "type": "string", "maxLength": 20 },
+        "pan": { "type": "string", "maxLength": 20 },
+        "gstin": { "type": "string", "maxLength": 30 },
+        "tan": { "type": "string", "maxLength": 30 },
+        "financialYear": { "type": "string", "enum": ["FY 2026-27", "FY 2025-26", "FY 2024-25"] },
+        "services": { "type": "array" },
+        "assignedEmployeeId": { "type": "string", "maxLength": 128 },
+        "onboardingDate": { "type": "string", "maxLength": 30 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["Active", "Inactive", "Archived"] },
+        "requiredCategories": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "clientCode",
+        "name",
+        "type",
+        "dobOrIncDate",
+        "email",
+        "phone",
+        "address",
+        "city",
+        "state",
+        "pinCode",
+        "pan",
+        "financialYear",
+        "services",
+        "assignedEmployeeId",
+        "onboardingDate",
+        "notes",
+        "status",
+        "requiredCategories",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DocumentRecord": {
+      "title": "Document Repository Record",
+      "description": "Uploaded or extracted client document metadata and verification history.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "fileType": { "type": "string", "enum": ["PDF", "XLSX", "JPG", "PNG", "CSV"] },
+        "fileSize": { "type": "string", "maxLength": 40 },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "category": { "type": "string", "maxLength": 80 },
+        "financialYear": { "type": "string", "enum": ["FY 2026-27", "FY 2025-26", "FY 2024-25"] },
+        "uploadedBy": { "type": "string", "maxLength": 160 },
+        "uploadedByRole": { "type": "string", "enum": ["Client", "Staff"] },
+        "uploadDate": { "type": "string", "maxLength": 30 },
+        "status": { "type": "string", "enum": ["Uploaded", "Pending Review", "Verified", "Rejected", "Replacement Required"] },
+        "previewSummary": { "type": "string", "maxLength": 3000 },
+        "extractedMetrics": { "type": "object" },
+        "comments": { "type": "array" },
+        "history": { "type": "array" },
+        "linkedRequestId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "name",
+        "fileType",
+        "fileSize",
+        "clientId",
+        "category",
+        "financialYear",
+        "uploadedBy",
+        "uploadedByRole",
+        "uploadDate",
+        "status",
+        "previewSummary",
+        "comments",
+        "history",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ComplianceTask": {
+      "title": "Compliance Filing Task",
+      "description": "Statutory compliance calendar item and progress log.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "type": "string", "maxLength": 80 },
+        "financialYear": { "type": "string", "enum": ["FY 2026-27", "FY 2025-26", "FY 2024-25"] },
+        "dueDate": { "type": "string", "maxLength": 30 },
+        "assignedEmployeeId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["Not Started", "In Progress", "Awaiting Documents", "Under Review", "Completed", "Overdue"] },
+        "priority": { "type": "string", "enum": ["Low", "Medium", "High", "Urgent"] },
+        "description": { "type": "string", "maxLength": 2000 },
+        "requiredDocuments": { "type": "array" },
+        "reminderDaysBefore": { "type": "number" },
+        "completionDate": { "type": "string", "maxLength": 30 },
+        "progressHistory": { "type": "array" },
+        "internalNotes": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "title",
+        "clientId",
+        "type",
+        "financialYear",
+        "dueDate",
+        "assignedEmployeeId",
+        "status",
+        "priority",
+        "description",
+        "requiredDocuments",
+        "reminderDaysBefore",
+        "progressHistory",
+        "internalNotes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StaffTask": {
+      "title": "Internal Staff Workflow Task",
+      "description": "Internal CA team task with priority, timeline, and comments.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 3000 },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "assignedEmployeeId": { "type": "string", "maxLength": 128 },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "priority": { "type": "string", "enum": ["Low", "Medium", "High", "Urgent"] },
+        "startDate": { "type": "string", "maxLength": 30 },
+        "dueDate": { "type": "string", "maxLength": 30 },
+        "relatedComplianceId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["Not Started", "In Progress", "Awaiting Client", "Under Review", "Completed"] },
+        "attachments": { "type": "array" },
+        "comments": { "type": "array" },
+        "timeline": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "title",
+        "description",
+        "clientId",
+        "assignedEmployeeId",
+        "createdBy",
+        "priority",
+        "startDate",
+        "dueDate",
+        "status",
+        "attachments",
+        "comments",
+        "timeline",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DocumentRequest": {
+      "title": "Client Document Request",
+      "description": "Document collection request sent to a client.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "category": { "type": "string", "maxLength": 80 },
+        "financialYear": { "type": "string", "enum": ["FY 2026-27", "FY 2025-26", "FY 2024-25"] },
+        "requestedBy": { "type": "string", "maxLength": 160 },
+        "requestedDate": { "type": "string", "maxLength": 30 },
+        "dueDate": { "type": "string", "maxLength": 30 },
+        "status": { "type": "string", "enum": ["Sent to Client", "Uploaded by Client", "Under CA Review", "Verified", "Correction Requested"] },
+        "message": { "type": "string", "maxLength": 2000 },
+        "linkedDocumentId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "clientId",
+        "title",
+        "category",
+        "financialYear",
+        "requestedBy",
+        "requestedDate",
+        "dueDate",
+        "status",
+        "message",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AppNotification": {
+      "title": "Workspace Notification",
+      "description": "In-app alert for practice events.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "message": { "type": "string", "maxLength": 1000 },
+        "type": { "type": "string", "enum": ["document", "compliance", "task", "system"] },
+        "read": { "type": "boolean" },
+        "timestamp": { "type": "string", "maxLength": 40 },
+        "linkSection": { "type": "string", "maxLength": 40 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "title", "message", "type", "read", "timestamp", "createdAt", "updatedAt"]
+    },
+    "ScheduledReminder": {
+      "title": "Scheduled Reminder",
+      "description": "Scheduled follow-up or compliance reminder.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reminderType": { "type": "string", "enum": ["Document Follow-up", "Compliance Deadline", "Client Check-in"] },
+        "channel": { "type": "string", "enum": ["Email (Simulated)", "WhatsApp (Simulated)", "Portal Alert"] },
+        "scheduledFor": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["Scheduled", "Sent (Simulated)", "Overdue"] },
+        "message": { "type": "string", "maxLength": 2000 },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "title", "clientId", "reminderType", "channel", "scheduledFor", "status", "message", "createdBy", "createdAt", "updatedAt"]
+    },
+    "CommunicationLog": {
+      "title": "Client Communication Log",
+      "description": "Audit log of CA-client communication entries.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "direction": { "type": "string", "enum": ["Outbound (CA -> Client)", "Inbound (Client -> CA)"] },
+        "channel": { "type": "string", "enum": ["Client Portal", "Email (Simulated)", "Phone Note"] },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "message": { "type": "string", "maxLength": 3000 },
+        "sender": { "type": "string", "maxLength": 160 },
+        "timestamp": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "clientId", "direction", "channel", "subject", "message", "sender", "timestamp", "createdAt", "updatedAt"]
+    },
+    "ValidationIssue": {
+      "title": "Validation Issue",
+      "description": "Document field validation finding for CA review.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "documentId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "fieldLabel": { "type": "string", "maxLength": 120 },
+        "detectedValue": { "type": "string", "maxLength": 500 },
+        "expectedFormatOrCrossRef": { "type": "string", "maxLength": 500 },
+        "severity": { "type": "string", "enum": ["Informational", "Warning", "Critical"] },
+        "status": { "type": "string", "enum": ["Open", "Reviewed", "Approved", "Correction Requested", "Rejected"] },
+        "internalComments": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "clientId", "title", "fieldLabel", "detectedValue", "expectedFormatOrCrossRef", "severity", "status", "internalComments", "createdAt", "updatedAt"]
+    },
+    "CrossDocumentComparison": {
+      "title": "Cross-Document Reconciliation",
+      "description": "Comparison between two financial document sources.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "metric": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "sourceAName": { "type": "string", "maxLength": 200 },
+        "sourceAValue": { "type": "string", "maxLength": 200 },
+        "sourceBName": { "type": "string", "maxLength": 200 },
+        "sourceBValue": { "type": "string", "maxLength": 200 },
+        "varianceStatus": { "type": "string", "enum": ["Matched", "Potential Mismatch", "Missing Info", "Requires CA Review"] },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "clientId", "metric", "sourceAName", "sourceAValue", "sourceBName", "sourceBValue", "varianceStatus", "notes", "createdAt", "updatedAt"]
+    },
+    "FinancialSummaryRecord": {
+      "title": "Financial Summary Record",
+      "description": "Monthly revenue, expense, and GST summary record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "financialYear": { "type": "string", "enum": ["FY 2026-27", "FY 2025-26", "FY 2024-25"] },
+        "month": { "type": "string", "maxLength": 40 },
+        "sourceType": { "type": "string", "enum": ["Document-Extracted (Provisional)", "Finalized Accounting Record"] },
+        "revenue": { "type": "number" },
+        "expenses": { "type": "number" },
+        "taxableValue": { "type": "number" },
+        "cgst": { "type": "number" },
+        "sgst": { "type": "number" },
+        "igst": { "type": "number" },
+        "invoiceCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "clientId", "financialYear", "month", "sourceType", "revenue", "expenses", "taxableValue", "cgst", "sgst", "igst", "invoiceCount", "createdAt", "updatedAt"]
+    },
+    "FinancialAnomaly": {
+      "title": "Financial Anomaly Alert",
+      "description": "Flagged variance, duplicate, or tax anomaly awaiting CA review.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "documentId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "maxLength": 100 },
+        "severity": { "type": "string", "enum": ["Informational", "Warning", "Critical"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "sourceARef": { "type": "string", "maxLength": 200 },
+        "sourceAValue": { "type": "string", "maxLength": 200 },
+        "sourceBRef": { "type": "string", "maxLength": 200 },
+        "sourceBValue": { "type": "string", "maxLength": 200 },
+        "varianceAmount": { "type": "number" },
+        "detectedAt": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["Flagged for CA Review", "Task Created", "Resolved", "Dismissed"] },
+        "linkedTaskId": { "type": "string", "maxLength": 128 },
+        "caNote": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "clientId", "type", "severity", "title", "description", "sourceARef", "sourceAValue", "sourceBRef", "sourceBValue", "detectedAt", "status", "createdAt", "updatedAt"]
+    },
+    "ActivityLog": {
+      "title": "Audit Activity Log",
+      "description": "Chronological activity log entry for practice audit trail.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "actor": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "timestamp": { "type": "string", "maxLength": 40 },
+        "section": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "actor", "action", "target", "timestamp", "section", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublic" },
+      "description": "Public non-PII user profile."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Private PII (email, phone) accessible only to the user or admin."
+    },
+    "/firms/{firmId}": {
+      "schema": { "$ref": "#/entities/FirmWorkspace" },
+      "description": "CA Firm workspace root document holding settings and role permissions."
+    },
+    "/firms/{firmId}/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Firm staff roster."
+    },
+    "/firms/{firmId}/clients/{clientId}": {
+      "schema": { "$ref": "#/entities/Client" },
+      "description": "Clients managed within the firm workspace."
+    },
+    "/firms/{firmId}/documents/{documentId}": {
+      "schema": { "$ref": "#/entities/DocumentRecord" },
+      "description": "Client document records and extracted metrics."
+    },
+    "/firms/{firmId}/complianceTasks/{taskId}": {
+      "schema": { "$ref": "#/entities/ComplianceTask" },
+      "description": "Compliance filing tasks."
+    },
+    "/firms/{firmId}/staffTasks/{taskId}": {
+      "schema": { "$ref": "#/entities/StaffTask" },
+      "description": "Internal staff tasks."
+    },
+    "/firms/{firmId}/docRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/DocumentRequest" },
+      "description": "Document collection requests."
+    },
+    "/firms/{firmId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/AppNotification" },
+      "description": "Workspace notifications."
+    },
+    "/firms/{firmId}/reminders/{reminderId}": {
+      "schema": { "$ref": "#/entities/ScheduledReminder" },
+      "description": "Scheduled reminders."
+    },
+    "/firms/{firmId}/communications/{commId}": {
+      "schema": { "$ref": "#/entities/CommunicationLog" },
+      "description": "Client communication history."
+    },
+    "/firms/{firmId}/validationIssues/{issueId}": {
+      "schema": { "$ref": "#/entities/ValidationIssue" },
+      "description": "Document validation findings."
+    },
+    "/firms/{firmId}/crossComparisons/{compId}": {
+      "schema": { "$ref": "#/entities/CrossDocumentComparison" },
+      "description": "Cross-document reconciliation records."
+    },
+    "/firms/{firmId}/financialRecords/{recordId}": {
+      "schema": { "$ref": "#/entities/FinancialSummaryRecord" },
+      "description": "Client financial summary entries."
+    },
+    "/firms/{firmId}/anomalies/{anomalyId}": {
+      "schema": { "$ref": "#/entities/FinancialAnomaly" },
+      "description": "Flagged financial anomalies."
+    },
+    "/firms/{firmId}/activities/{activityId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Audit trail entries."
+    }
+  }
+}

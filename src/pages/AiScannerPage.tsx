@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ScanLine,
   UploadCloud,
@@ -13,9 +13,13 @@ import {
   Calculator,
   Zap,
   Bot,
+  Camera,
+  RefreshCw,
+  X,
+  UserPlus,
 } from 'lucide-react';
 import { formatINR, usePractice } from '../context/PracticeContext';
-import { DocumentCategory, ExtractedDocumentPayload, FinancialYear } from '../types';
+import { ClientType, DocumentCategory, ExtractedDocumentPayload, FinancialYear } from '../types';
 
 type ScannerDocType = 'Tax Invoice' | 'Bank Statement' | 'PAN / GST Certificate';
 
@@ -85,23 +89,33 @@ const SAMPLE_TEMPLATES: Record<
 };
 
 function resolveScannerMimeType(file: File): string {
+  const normalizedType = file.type?.toLowerCase().trim();
+  if (normalizedType === 'image/jpg' || normalizedType === 'image/pjpeg') return 'image/jpeg';
+  if (normalizedType === 'image/x-png') return 'image/png';
+  if (normalizedType && normalizedType !== 'application/octet-stream') return normalizedType;
   const ext = file.name.split('.').pop()?.toLowerCase() || '';
   if (ext === 'pdf') return 'application/pdf';
   if (ext === 'png') return 'image/png';
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
   if (ext === 'webp') return 'image/webp';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'heic' || ext === 'heif') return 'image/heic';
   if (ext === 'csv') return 'text/csv';
   if (ext === 'txt' || ext === 'json') return 'text/plain';
-  return file.type || 'application/pdf';
+  return 'application/pdf';
 }
 
-function readFileAsBase64(file: File): Promise<string> {
+function readFileAsDataUrl(file: File): Promise<{ dataUrl: string; base64: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      const result = String(reader.result || '');
-      const base64 = result.includes(',') ? result.split(',')[1] : result;
-      resolve(base64);
+      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+      const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1].trim() : dataUrl.trim();
+      if (!base64) {
+        reject(new Error('Selected file could not be encoded (empty payload).'));
+        return;
+      }
+      resolve({ dataUrl, base64 });
     };
     reader.onerror = () => reject(new Error('Failed to read local file.'));
     reader.readAsDataURL(file);
@@ -110,10 +124,12 @@ function readFileAsBase64(file: File): Promise<string> {
 
 export const AiScannerPage: React.FC = () => {
   const {
+    firebaseUser,
     clients,
     selectedFY,
     settings,
     currentUser,
+    addClientAsync,
     addDocument,
     addFinancialRecord,
     runDocumentToActionPipeline,
@@ -122,20 +138,147 @@ export const AiScannerPage: React.FC = () => {
   } = usePractice();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraCaptureInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const [docType, setDocType] = useState<ScannerDocType>('Tax Invoice');
-  const [clientId, setClientId] = useState(clients[0]?.id || 'cli-1');
+  const [clientId, setClientId] = useState(clients[0]?.id || '');
   const [fy, setFy] = useState<FinancialYear>(selectedFY);
+
+  useEffect(() => {
+    if (!clientId || !clients.some((c) => c.id === clientId)) {
+      setClientId(clients[0]?.id || '');
+    }
+  }, [clients, clientId]);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [uploadedFileSize, setUploadedFileSize] = useState<string>('640 KB');
+  const [lastUploadedFile, setLastUploadedFile] = useState<File | null>(null);
   const [isScanning, setIsScanning] = useState(false);
+  const [creatingClientFromScan, setCreatingClientFromScan] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const [zoom, setZoom] = useState<number>(100);
+  const blobUrlRef = useRef<string | null>(null);
+
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
+
+  const stopCameraStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+      }
+    };
+  }, []);
+
+  const startCamera = async (mode: 'environment' | 'user') => {
+    stopCameraStream();
+    setCameraError(null);
+    setCameraLoading(true);
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraLoading(false);
+      setCameraError(
+        'Live camera preview is not supported in this browser context. Use "Take Picture via Device Camera" below to snap and scan a photo.'
+      );
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: mode },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => undefined);
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Camera permission denied or no camera device detected.';
+      setCameraError(
+        `${msg} You can still use "Take Picture via Device Camera" below to capture and scan an image.`
+      );
+    } finally {
+      setCameraLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (cameraOpen) {
+      void startCamera(facingMode);
+    } else {
+      stopCameraStream();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraOpen, facingMode]);
+
+  const captureAndScanPhoto = () => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2) {
+      addToast('Camera Not Ready', 'Wait for the camera feed to initialize before capturing.', 'warning');
+      return;
+    }
+
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      addToast('Capture Error', 'Could not initialize image canvas.', 'error');
+      return;
+    }
+    ctx.drawImage(video, 0, 0, width, height);
+
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          addToast('Capture Error', 'Failed to capture image frame from camera.', 'error');
+          return;
+        }
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const capturedFile = new File([blob], `Camera_Scan_${stamp}.jpg`, {
+          type: 'image/jpeg',
+        });
+        stopCameraStream();
+        setCameraOpen(false);
+        void handleUserFileSelected(capturedFile);
+      },
+      'image/jpeg',
+      0.92
+    );
+  };
+
   const [scanResult, setScanResult] = useState<{
     mode: 'sample' | 'gemini-live' | 'manual';
     docType: ScannerDocType;
     fileName: string;
+    previewUrl?: string;
+    previewMimeType?: string;
+    previewText?: string;
     fields: ExtractionField[];
     warnings: string[];
     caApproved: boolean;
@@ -145,6 +288,8 @@ export const AiScannerPage: React.FC = () => {
   const runSampleScan = (typeOverride?: ScannerDocType) => {
     const activeType = typeOverride ?? docType;
     setApiError(null);
+    setUploadedFileName(null);
+    setLastUploadedFile(null);
     setIsScanning(true);
     setScanResult(null);
 
@@ -159,11 +304,12 @@ export const AiScannerPage: React.FC = () => {
         caApproved: false,
       });
       setIsScanning(false);
-    }, 650);
+    }, 450);
   };
 
   const handleUserFileSelected = async (file: File | null) => {
     if (!file) return;
+    setLastUploadedFile(file);
     setUploadedFileName(file.name);
     const sizeKB = Math.max(12, Math.round(file.size / 1024));
     setUploadedFileSize(sizeKB >= 1024 ? `${(sizeKB / 1024).toFixed(1)} MB` : `${sizeKB} KB`);
@@ -171,12 +317,28 @@ export const AiScannerPage: React.FC = () => {
     setIsScanning(true);
     setScanResult(null);
 
-    try {
-      const ext = file.name.split('.').pop()?.toLowerCase() || '';
-      const resolvedMime = resolveScannerMimeType(file);
-      const isText = ext === 'csv' || ext === 'txt' || ext === 'json' || resolvedMime.startsWith('text/');
-      const isSupportedBinary = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'].includes(resolvedMime);
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
 
+    let previewUrl: string | undefined;
+    let previewText: string | undefined;
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    const resolvedMime = resolveScannerMimeType(file);
+    const isText = ext === 'csv' || ext === 'txt' || ext === 'json' || resolvedMime.startsWith('text/');
+    const isImage = resolvedMime.startsWith('image/');
+    const isSupportedBinary = [
+      'application/pdf',
+      'image/png',
+      'image/jpeg',
+      'image/webp',
+      'image/gif',
+      'image/heic',
+      'image/heif',
+    ].includes(resolvedMime);
+
+    try {
       if (!isText && !isSupportedBinary) {
         throw new Error(
           `Unsupported file format (.${ext || 'unknown'}). Please upload PDF, PNG, JPG, WEBP, CSV, or TXT.`
@@ -194,9 +356,22 @@ export const AiScannerPage: React.FC = () => {
       };
 
       if (isText) {
-        payload.textContent = await file.text();
+        const txt = await file.text();
+        if (!txt.trim()) {
+          throw new Error('The uploaded text/CSV file is empty.');
+        }
+        previewText = txt;
+        payload.textContent = txt;
       } else {
-        payload.base64Data = await readFileAsBase64(file);
+        const { dataUrl, base64 } = await readFileAsDataUrl(file);
+        payload.base64Data = base64;
+        if (isImage) {
+          previewUrl = dataUrl;
+        } else if (resolvedMime === 'application/pdf') {
+          const objUrl = URL.createObjectURL(file);
+          blobUrlRef.current = objUrl;
+          previewUrl = objUrl;
+        }
       }
 
       const res = await fetch('/api/copilot/extract-document', {
@@ -245,6 +420,7 @@ export const AiScannerPage: React.FC = () => {
           value: extData.invoiceOrRefNo || '',
         },
         { key: 'documentDate', label: 'Document Date', value: extData.documentDate || '' },
+        { key: 'period', label: 'Period', value: extData.period || '' },
         {
           key: 'taxableValue',
           label: 'Taxable Value (INR)',
@@ -276,6 +452,9 @@ export const AiScannerPage: React.FC = () => {
         mode: 'gemini-live',
         docType: inferredType,
         fileName: file.name,
+        previewUrl,
+        previewMimeType: resolvedMime,
+        previewText,
         fields: liveFields,
         warnings:
           extData.anomaliesDetected.length > 0
@@ -300,10 +479,13 @@ export const AiScannerPage: React.FC = () => {
         mode: 'manual',
         docType,
         fileName: file.name,
+        previewUrl,
+        previewMimeType: resolvedMime,
+        previewText,
         fields: blankFields,
         warnings: [
           msg,
-          'No OCR values were fabricated. Enter fields manually on the right or load a Synthetic Sample Demo.',
+          'No OCR values were fabricated. Enter fields manually on the right or re-run AI extraction.',
         ],
         caApproved: false,
       });
@@ -337,6 +519,9 @@ export const AiScannerPage: React.FC = () => {
     const sgst = num('sgst');
     const igst = num('igst');
     const total = num('totalAmount');
+    if (taxable === 0 && total === 0 && cgst === 0 && sgst === 0 && igst === 0) {
+      return null;
+    }
     const computedTotal = taxable + cgst + sgst + igst;
     const diff = Math.abs(total - computedTotal);
     const cgstSgstEqual = cgst === sgst;
@@ -370,6 +555,10 @@ export const AiScannerPage: React.FC = () => {
 
   const handleSaveToClient = () => {
     if (!scanResult) return;
+    if (!clientId || !clients.some((c) => c.id === clientId)) {
+      addToast('Client required', 'Please onboard a client first before saving scanned records.', 'warning');
+      return;
+    }
 
     const mappedCategory = resolveMappedCategory();
     const taxable = getNum('taxableValue');
@@ -436,6 +625,10 @@ export const AiScannerPage: React.FC = () => {
 
   const handleRunDocumentToAction = () => {
     if (!scanResult) return;
+    if (!clientId || !clients.some((c) => c.id === clientId)) {
+      addToast('Client required', 'Please onboard a client first before running Document-to-Action.', 'warning');
+      return;
+    }
     const mappedCategory = resolveMappedCategory();
     const taxable = getNum('taxableValue');
     const cgst = getNum('cgst');
@@ -496,6 +689,15 @@ export const AiScannerPage: React.FC = () => {
         <div className="flex items-center gap-2 shrink-0 flex-wrap">
           <button
             type="button"
+            onClick={() => setCameraOpen(true)}
+            disabled={isScanning}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-500 rounded-lg whitespace-nowrap disabled:opacity-60 transition-colors"
+          >
+            <Camera className="w-4 h-4" />
+            Scan with Camera
+          </button>
+          <button
+            type="button"
             onClick={() =>
               openCopilotWithPrompt(
                 'Guide me on what documents I can upload for verbatim extraction and GST verification.'
@@ -509,13 +711,141 @@ export const AiScannerPage: React.FC = () => {
           <button
             type="button"
             onClick={() => runSampleScan()}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-teal-600 hover:bg-teal-500 rounded-lg whitespace-nowrap transition-colors"
+            disabled={isScanning}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-200 bg-[#101C33] hover:bg-[#172848] border border-[#243B63] rounded-lg whitespace-nowrap disabled:opacity-60 transition-colors"
           >
-            <ScanLine className="w-4 h-4" />
-            Run Sample Extraction Demo
+            <ScanLine className="w-4 h-4 text-teal-400" />
+            Run Sample Demo
           </button>
         </div>
       </div>
+
+      {/* Live Camera Capture Modal */}
+      {cameraOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#020611]/85 backdrop-blur-xs p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCameraOpen(false);
+          }}
+        >
+          <div className="w-full max-w-2xl bg-[#081020] border border-[#1E2E4E] rounded-2xl overflow-hidden shadow-2xl">
+            <div className="px-5 py-3.5 border-b border-[#1A2945] bg-[#060C18] flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <span className="w-8 h-8 rounded-lg bg-teal-600/20 border border-teal-500/40 text-teal-300 flex items-center justify-center">
+                  <Camera className="w-4 h-4" />
+                </span>
+                <div>
+                  <h2 className="text-sm font-bold text-slate-100 font-display">
+                    Camera Document Scanner
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Point your camera at a Tax Invoice, Bank Statement, PAN, or GST Certificate to read &amp; extract its data
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCameraOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-[#13223D]"
+                aria-label="Close Camera"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <input
+                ref={cameraCaptureInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={(e) => {
+                  const snapped = e.target.files?.[0] || null;
+                  e.target.value = '';
+                  if (snapped) {
+                    setCameraOpen(false);
+                    void handleUserFileSelected(snapped);
+                  }
+                }}
+              />
+
+              {cameraError ? (
+                <div className="p-6 rounded-xl bg-[#050A14] border border-amber-500/40 text-center space-y-3">
+                  <AlertTriangle className="w-7 h-7 text-amber-400 mx-auto" />
+                  <p className="text-xs text-amber-200 max-w-md mx-auto leading-relaxed">
+                    {cameraError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => cameraCaptureInputRef.current?.click()}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold transition-colors"
+                  >
+                    <Camera className="w-4 h-4" />
+                    Take Picture via Device Camera
+                  </button>
+                </div>
+              ) : (
+                <div className="relative bg-[#050A14] border border-[#1E2E4E] rounded-xl overflow-hidden aspect-video flex items-center justify-center">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                  {cameraLoading && (
+                    <div className="absolute inset-0 bg-[#050A14]/80 flex flex-col items-center justify-center gap-2 text-xs text-teal-300">
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                      <span>Starting camera feed...</span>
+                    </div>
+                  )}
+                  {/* Alignment guide overlay */}
+                  <div className="pointer-events-none absolute inset-6 border border-dashed border-teal-400/50 rounded-lg" />
+                  <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-md bg-[#050A14]/75 border border-[#1E2E4E] text-[11px] text-slate-300 whitespace-nowrap">
+                    Keep document flat &amp; well-lit for sharp GSTIN / amount reading
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFacingMode((m) => (m === 'environment' ? 'user' : 'environment'))
+                    }
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#101C33] hover:bg-[#172848] border border-[#243B63] text-xs text-slate-200"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 text-teal-400" />
+                    Switch Camera
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => cameraCaptureInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#101C33] hover:bg-[#172848] border border-[#243B63] text-xs text-slate-300"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5 text-teal-400" />
+                    Device Camera / Photo
+                  </button>
+                </div>
+
+                {!cameraError && (
+                  <button
+                    type="button"
+                    disabled={cameraLoading}
+                    onClick={captureAndScanPhoto}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors"
+                  >
+                    <ScanLine className="w-4 h-4" />
+                    Capture &amp; Extract Data
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Setup Card */}
       <section className="bg-[#0B1426] border border-[#1E2E4E] rounded-xl p-5 space-y-4">
@@ -576,7 +906,7 @@ export const AiScannerPage: React.FC = () => {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.jpg,.jpeg,.png,.webp,.csv,.txt"
+            accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.csv,.txt"
             className="hidden"
             onChange={(e) => {
               handleUserFileSelected(e.target.files?.[0] || null);
@@ -586,11 +916,11 @@ export const AiScannerPage: React.FC = () => {
           <UploadCloud className="w-7 h-7 text-teal-400 mx-auto mb-2" />
           <p className="text-sm font-semibold text-slate-100">
             {uploadedFileName
-              ? `Selected: ${uploadedFileName}`
-              : 'Upload a real Tax Invoice, Bank Statement, or Tax Certificate (.pdf, .png, .jpg, .csv, .txt)'}
+              ? `Selected: ${uploadedFileName} (${uploadedFileSize})`
+              : 'Upload a real Tax Invoice, Bank Statement, or Tax Certificate (.pdf, .png, .jpg, .webp, .csv, .txt)'}
           </p>
           <p className="text-xs text-slate-400 mt-1">
-            Uploaded files are extracted verbatim via Gemini AI, or click &ldquo;Run Sample Extraction Demo&rdquo; for {docType}.
+            Uploading a file immediately extracts all data verbatim via Gemini AI and displays your file below.
           </p>
         </div>
 
@@ -608,24 +938,47 @@ export const AiScannerPage: React.FC = () => {
               Extracted figures are never rounded or altered automatically. All entries require CA verification before filing.
             </span>
           </div>
-          <button
-            type="button"
-            onClick={() => runSampleScan()}
-            disabled={isScanning}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-[#14274A] hover:bg-[#1B3360] border border-[#274680] rounded-lg disabled:opacity-60 transition-colors"
-          >
-            {isScanning ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Scanning Document...
-              </>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setCameraOpen(true)}
+              disabled={isScanning}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-teal-200 bg-[#0E2240] hover:bg-[#14305A] border border-teal-500/40 rounded-lg disabled:opacity-60 transition-colors"
+            >
+              <Camera className="w-3.5 h-3.5 text-teal-400" />
+              Scan with Camera
+            </button>
+            {lastUploadedFile ? (
+              <button
+                type="button"
+                onClick={() => void handleUserFileSelected(lastUploadedFile)}
+                disabled={isScanning}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-teal-600 hover:bg-teal-500 rounded-lg disabled:opacity-60 transition-colors"
+              >
+                {isScanning ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Extracting File...
+                  </>
+                ) : (
+                  <>
+                    <ScanLine className="w-3.5 h-3.5" />
+                    Re-run AI Extraction
+                  </>
+                )}
+              </button>
             ) : (
-              <>
-                <ScanLine className="w-3.5 h-3.5" />
-                Run Sample Scan
-              </>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isScanning}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-teal-600 hover:bg-teal-500 rounded-lg disabled:opacity-60 transition-colors"
+              >
+                <UploadCloud className="w-3.5 h-3.5" />
+                Upload Document to Extract
+              </button>
             )}
-          </button>
+          </div>
         </div>
       </section>
 
@@ -668,6 +1021,85 @@ export const AiScannerPage: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2 shrink-0 flex-wrap">
+              {scanResult.livePayload?.partyName &&
+                !/^(not found|n\/a|none|unknown|-|—)$/i.test(scanResult.livePayload.partyName.trim()) && (
+                  <button
+                    type="button"
+                    disabled={creatingClientFromScan}
+                    onClick={async () => {
+                      if (!firebaseUser) {
+                        addToast('Sign in required', 'Sign in with Google to save clients to Firestore.', 'warning');
+                        return;
+                      }
+                      const lp = scanResult.livePayload!;
+                      const cleanField = (v?: string) => {
+                        const s = (v || '').trim();
+                        return !s || /^(not found in document|not found|n\/a|na|none|unknown|null|undefined|-|—)$/i.test(s)
+                          ? ''
+                          : s;
+                      };
+                      const party = cleanField(lp.partyName).slice(0, 160);
+                      const panClean = cleanField(lp.pan).slice(0, 20).toUpperCase();
+                      const gstinClean = cleanField(lp.gstin).slice(0, 30).toUpperCase();
+                      if (!party) return;
+
+                      setCreatingClientFromScan(true);
+                      try {
+                        const existing = clients.find(
+                          (c) =>
+                            c.name.toLowerCase() === party.toLowerCase() ||
+                            (panClean && c.pan && c.pan.toUpperCase() === panClean) ||
+                            (gstinClean && c.gstin && c.gstin.toUpperCase() === gstinClean)
+                        );
+                        if (existing) {
+                          setClientId(existing.id);
+                          addToast('Existing Client Linked', `Selected ${existing.name} (${existing.clientCode}).`);
+                          return;
+                        }
+                        const inferredType: ClientType =
+                          lp.inferredEntityType ||
+                          (party.toLowerCase().includes('llp')
+                            ? 'LLP'
+                            : party.toLowerCase().includes('partner')
+                            ? 'Partnership'
+                            : party.toLowerCase().includes('pvt') || party.toLowerCase().includes('private')
+                            ? 'Private Limited'
+                            : 'Private Limited');
+                        const created = await addClientAsync({
+                          name: party,
+                          type: inferredType,
+                          dobOrIncDate: '',
+                          email: cleanField(lp.email).slice(0, 200),
+                          phone: cleanField(lp.phone).slice(0, 40),
+                          address: cleanField(lp.address).slice(0, 300),
+                          city: cleanField(lp.city).slice(0, 80),
+                          state: cleanField(lp.state).slice(0, 80),
+                          pinCode: cleanField(lp.pinCode).slice(0, 20),
+                          pan: panClean,
+                          ...(gstinClean ? { gstin: gstinClean } : {}),
+                          financialYear: fy,
+                          services: [],
+                          assignedEmployeeId: currentUser.id,
+                          onboardingDate: new Date().toISOString().slice(0, 10),
+                          notes: `Created directly from AI Scanner (${scanResult.fileName}).`,
+                          status: 'Active',
+                          requiredCategories: [],
+                        });
+                        setClientId(created.id);
+                      } finally {
+                        setCreatingClientFromScan(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-teal-200 bg-[#0E2240] hover:bg-[#14305A] border border-teal-500/40 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {creatingClientFromScan ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <UserPlus className="w-3.5 h-3.5 text-teal-400" />
+                    )}
+                    Add Client from Scan
+                  </button>
+                )}
               <button
                 type="button"
                 onClick={() =>
@@ -734,43 +1166,73 @@ export const AiScannerPage: React.FC = () => {
                   className="bg-[#0B1426] border border-[#1E2E4E] rounded-lg p-5 w-full text-[11px] text-slate-300 space-y-4 origin-top transition-transform"
                   style={{ transform: `scale(${zoom / 100})` }}
                 >
-                  {scanResult.mode === 'gemini-live' && scanResult.livePayload ? (
+                  {scanResult.mode !== 'sample' ? (
                     <div className="space-y-3">
-                      <div className="border-b border-[#1E2E4E] pb-2.5">
-                        <div className="text-[10px] font-mono uppercase tracking-wider text-teal-400">
-                          Verbatim Briefing · {scanResult.livePayload.detectedCategory}
-                        </div>
-                        <div className="font-bold text-xs text-slate-100 mt-0.5">
-                          {scanResult.livePayload.documentTitle}
-                        </div>
-                      </div>
-                      <p className="text-slate-300 leading-relaxed">
-                        {scanResult.livePayload.executiveBriefing}
-                      </p>
-                      {scanResult.livePayload.verbatimLineItems.length > 0 && (
-                        <div className="pt-2 border-t border-[#192845] space-y-1.5">
-                          <div className="text-[10px] font-mono uppercase text-slate-400">
-                            Verbatim Extracted Line Items
+                      <div className="flex items-center justify-between border-b border-[#1E2E4E] pb-2">
+                        <div>
+                          <div className="text-[10px] font-mono uppercase tracking-wider text-teal-400">
+                            {scanResult.livePayload
+                              ? `Uploaded Document · ${scanResult.livePayload.detectedCategory}`
+                              : 'Uploaded Document Preview'}
                           </div>
-                          <ul className="space-y-1 font-mono text-[11px] text-slate-200">
-                            {scanResult.livePayload.verbatimLineItems.map((line, i) => (
-                              <li
-                                key={i}
-                                className="bg-[#081020] border border-[#192845] rounded px-2.5 py-1.5"
-                              >
-                                {line}
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="font-bold text-xs text-slate-100 mt-0.5 truncate max-w-[260px]">
+                            {scanResult.fileName}
+                          </div>
+                        </div>
+                        {scanResult.previewUrl && (
+                          <a
+                            href={scanResult.previewUrl}
+                            download={scanResult.fileName}
+                            className="text-[11px] text-teal-400 hover:underline shrink-0"
+                          >
+                            Download Copy
+                          </a>
+                        )}
+                      </div>
+
+                      {scanResult.previewMimeType?.startsWith('image/') && scanResult.previewUrl ? (
+                        <div className="bg-[#050A14] border border-[#192845] rounded-lg p-2 flex items-center justify-center overflow-auto max-h-[540px]">
+                          <img
+                            src={scanResult.previewUrl}
+                            alt={scanResult.fileName}
+                            className="max-w-full h-auto max-h-[510px] object-contain rounded"
+                          />
+                        </div>
+                      ) : scanResult.previewMimeType === 'application/pdf' && scanResult.previewUrl ? (
+                        <div className="bg-[#050A14] border border-[#192845] rounded-lg overflow-hidden">
+                          <iframe
+                            src={scanResult.previewUrl}
+                            title={scanResult.fileName}
+                            className="w-full h-[520px] bg-white"
+                          />
+                        </div>
+                      ) : scanResult.previewText ? (
+                        <pre className="text-[11px] font-mono text-slate-200 bg-[#050A14] border border-[#192845] rounded-lg p-3 max-h-[480px] overflow-auto whitespace-pre-wrap">
+                          {scanResult.previewText}
+                        </pre>
+                      ) : (
+                        <div className="py-10 text-center space-y-2 text-slate-400">
+                          <p className="font-semibold text-slate-100">{scanResult.fileName}</p>
+                          <p>Preview unavailable for this file format.</p>
                         </div>
                       )}
-                    </div>
-                  ) : scanResult.mode === 'manual' ? (
-                    <div className="py-12 text-center space-y-2 text-slate-400">
-                      <p className="font-semibold text-slate-100">{scanResult.fileName}</p>
-                      <p>
-                        Live extraction did not complete. Enter verified values manually in the right-hand panel or run the Sample Extraction Demo.
-                      </p>
+
+                      {scanResult.mode === 'manual' && (
+                        <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
+                          Live AI extraction did not complete. Your uploaded file is displayed above; enter fields manually on the right or click Re-run AI Extraction.
+                        </div>
+                      )}
+
+                      {scanResult.livePayload?.executiveBriefing && (
+                        <div className="pt-2 border-t border-[#192845] space-y-1">
+                          <div className="text-[10px] font-mono uppercase text-slate-400">
+                            AI Verbatim Briefing
+                          </div>
+                          <p className="text-slate-300 leading-relaxed">
+                            {scanResult.livePayload.executiveBriefing}
+                          </p>
+                        </div>
+                      )}
                     </div>
                   ) : scanResult.docType === 'Tax Invoice' ? (
                     <>
@@ -1013,6 +1475,24 @@ export const AiScannerPage: React.FC = () => {
                   );
                 })}
               </div>
+
+              {scanResult.livePayload && scanResult.livePayload.verbatimLineItems.length > 0 && (
+                <div className="pt-3 border-t border-[#1E2E4E] space-y-2">
+                  <div className="text-xs font-semibold text-slate-200">
+                    Verbatim Extracted Line Items ({scanResult.livePayload.verbatimLineItems.length})
+                  </div>
+                  <ul className="space-y-1.5 font-mono text-[11px] text-slate-200 max-h-48 overflow-y-auto">
+                    {scanResult.livePayload.verbatimLineItems.map((line, i) => (
+                      <li
+                        key={i}
+                        className="bg-[#081020] border border-[#192845] rounded px-3 py-1.5"
+                      >
+                        {line}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           </div>
         </section>

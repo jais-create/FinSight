@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Kanban,
   Table as TableIcon,
@@ -41,6 +41,7 @@ export const TasksPage: React.FC = () => {
     updateStaffTask,
     updateStaffTaskStatus,
     addStaffTaskComment,
+    addToast,
   } = usePractice();
 
   const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
@@ -54,14 +55,26 @@ export const TasksPage: React.FC = () => {
 
   const [tTitle, setTTitle] = useState('');
   const [tDesc, setTDesc] = useState('');
-  const [tClient, setTClient] = useState(clients[0]?.id || 'cli-1');
-  const [tEmp, setTEmp] = useState(employees[0]?.id || 'emp-1');
+  const [tClient, setTClient] = useState(clients[0]?.id || '');
+  const [tEmp, setTEmp] = useState(employees[0]?.id || currentUser.id);
   const [tPrio, setTPrio] = useState<PriorityLevel>('Medium');
   const [tStart, setTStart] = useState('2026-11-18');
   const [tDue, setTDue] = useState('2026-11-24');
   const [tComp, setTComp] = useState('');
   const [tAttach, setTAttach] = useState('');
   const [commentText, setCommentText] = useState('');
+
+  useEffect(() => {
+    if (!tClient || !clients.some((c) => c.id === tClient)) {
+      setTClient(clients[0]?.id || '');
+    }
+  }, [clients, tClient]);
+
+  useEffect(() => {
+    if (!tEmp || !employees.some((e) => e.id === tEmp)) {
+      setTEmp(employees[0]?.id || currentUser.id);
+    }
+  }, [employees, currentUser.id, tEmp]);
 
   const filteredTasks = useMemo(() => {
     return staffTasks.filter((t) => {
@@ -85,12 +98,16 @@ export const TasksPage: React.FC = () => {
 
   const handleCreateTask = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!tClient) {
+      addToast('Client required', 'Please onboard a client first before creating tasks.', 'warning');
+      return;
+    }
     if (!tTitle.trim()) return;
     addStaffTask({
       title: tTitle.trim(),
       description: tDesc.trim() || 'Assigned via FinSight Task Workspace.',
       clientId: tClient,
-      assignedEmployeeId: tEmp,
+      assignedEmployeeId: tEmp || currentUser.id,
       createdBy: currentUser.name,
       priority: tPrio,
       startDate: tStart,

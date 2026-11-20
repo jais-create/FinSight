@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Bell,
   Check,
@@ -43,7 +43,7 @@ export const RemindersPage: React.FC = () => {
   const [notifFilter, setNotifFilter] = useState<'all' | 'unread'>('all');
 
   const [newRemOpen, setNewRemOpen] = useState(false);
-  const [rClient, setRClient] = useState(clients[0]?.id || 'cli-1');
+  const [rClient, setRClient] = useState(clients[0]?.id || '');
   const [rType, setRType] = useState<'Document Follow-up' | 'Compliance Deadline' | 'Client Check-in'>(
     'Document Follow-up'
   );
@@ -55,11 +55,17 @@ export const RemindersPage: React.FC = () => {
   const [rMessage, setRMessage] = useState('');
 
   const [reqOpen, setReqOpen] = useState(false);
-  const [reqClient, setReqClient] = useState(clients[0]?.id || 'cli-1');
+  const [reqClient, setReqClient] = useState(clients[0]?.id || '');
   const [reqCat, setReqCat] = useState<DocumentCategory>('Bank Statements');
   const [reqTitle, setReqTitle] = useState('');
   const [reqDue, setReqDue] = useState('2026-11-24');
   const [reqMsg, setReqMsg] = useState('');
+
+  useEffect(() => {
+    const def = clients[0]?.id || '';
+    if (!rClient || !clients.some((c) => c.id === rClient)) setRClient(def);
+    if (!reqClient || !clients.some((c) => c.id === reqClient)) setReqClient(def);
+  }, [clients, rClient, reqClient]);
 
   const visibleNotifications = notifications.filter((n) =>
     notifFilter === 'unread' ? !n.read : true
@@ -67,6 +73,10 @@ export const RemindersPage: React.FC = () => {
 
   const handleScheduleReminder = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!rClient) {
+      addToast('Client required', 'Please onboard a client first before scheduling reminders.', 'warning');
+      return;
+    }
     if (!rTitle.trim()) return;
     addReminder({
       title: rTitle.trim(),
@@ -85,6 +95,10 @@ export const RemindersPage: React.FC = () => {
 
   const handleSendFollowUp = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!reqClient) {
+      addToast('Client required', 'Please onboard a client first before sending document requests.', 'warning');
+      return;
+    }
     if (!reqTitle.trim()) return;
     createDocumentRequest({
       clientId: reqClient,

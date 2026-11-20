@@ -1,0 +1,882 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3: Global Hardened Primitives
+    // -------------------------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'jaiswalarya17@gmail.com'
+      );
+    }
+
+    function isFirmOwner(firmId) {
+      return isVerifiedUser() &&
+        firmId == request.auth.uid &&
+        exists(/databases/$(database)/documents/firms/$(firmId)) &&
+        get(/databases/$(database)/documents/firms/$(firmId)).data.ownerUid == request.auth.uid;
+    }
+
+    function isStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isOptStr(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptNum(data, key) {
+      return !(key in data) || (data[key] is number);
+    }
+
+    function isBoundedList(val, maxLen) {
+      return val is list && val.size() <= maxLen && (val.size() == 0 || val[0] is string || val[0] is map);
+    }
+
+    function hasValidTimestampsOnCreate(data) {
+      return data.createdAt == request.time && data.updatedAt == request.time;
+    }
+
+    function hasValidTimestampsOnUpdate(data) {
+      return data.createdAt == existing().createdAt && data.updatedAt == request.time;
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Helpers (Pillar 2: Validation Blueprints)
+    // -------------------------------------------------------------------------
+    function isValidUserPublic(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'department', 'avatarInitials', 'active', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'role', 'department', 'avatarInitials', 'active', 'createdAt', 'updatedAt']) &&
+        data.uid == userId &&
+        isValidId(data.uid) &&
+        isStr(data.displayName, 1, 120) &&
+        data.role in ['Partner', 'Senior CA', 'Audit Executive', 'Tax Associate'] &&
+        isStr(data.department, 0, 100) &&
+        isStr(data.avatarInitials, 1, 4) &&
+        data.active is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivate(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'phone', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'phone', 'createdAt', 'updatedAt']) &&
+        data.uid == userId &&
+        isValidId(data.uid) &&
+        isStr(data.email, 0, 200) &&
+        isStr(data.phone, 0, 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFirm(data, firmId) {
+      return data.keys().hasAll([
+          'ownerUid', 'firmName', 'tagline', 'address', 'city', 'state', 'pinCode',
+          'icaiRegNo', 'gstin', 'email', 'phone', 'defaultFinancialYear',
+          'availableFinancialYears', 'enabledComplianceCategories', 'enabledDocumentCategories',
+          'notifications', 'preferences', 'permissions', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerUid', 'firmName', 'tagline', 'address', 'city', 'state', 'pinCode',
+          'icaiRegNo', 'gstin', 'email', 'phone', 'defaultFinancialYear',
+          'availableFinancialYears', 'enabledComplianceCategories', 'enabledDocumentCategories',
+          'notifications', 'preferences', 'permissions', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerUid == firmId &&
+        isValidId(data.ownerUid) &&
+        isStr(data.firmName, 1, 160) &&
+        isStr(data.tagline, 0, 200) &&
+        isStr(data.address, 0, 300) &&
+        isStr(data.city, 0, 80) &&
+        isStr(data.state, 0, 80) &&
+        isStr(data.pinCode, 0, 20) &&
+        isStr(data.icaiRegNo, 0, 40) &&
+        isStr(data.gstin, 0, 30) &&
+        isStr(data.email, 0, 160) &&
+        isStr(data.phone, 0, 40) &&
+        data.defaultFinancialYear in ['FY 2026-27', 'FY 2025-26', 'FY 2024-25'] &&
+        isBoundedList(data.availableFinancialYears, 10) &&
+        isBoundedList(data.enabledComplianceCategories, 20) &&
+        isBoundedList(data.enabledDocumentCategories, 30) &&
+        data.notifications is map &&
+        data.preferences is map &&
+        isBoundedList(data.permissions, 10) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidEmployee(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'name', 'role', 'email', 'phone', 'department', 'active', 'avatarInitials', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'name', 'role', 'email', 'phone', 'department', 'active', 'avatarInitials', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.name, 1, 120) &&
+        data.role in ['Partner', 'Senior CA', 'Audit Executive', 'Tax Associate'] &&
+        isStr(data.email, 0, 200) &&
+        isStr(data.phone, 0, 40) &&
+        isStr(data.department, 0, 100) &&
+        data.active is bool &&
+        isStr(data.avatarInitials, 1, 4) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidClient(data, firmId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'clientCode', 'name', 'type', 'dobOrIncDate', 'email', 'phone',
+          'address', 'city', 'state', 'pinCode', 'pan', 'financialYear', 'services',
+          'assignedEmployeeId', 'onboardingDate', 'notes', 'status', 'requiredCategories',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'clientCode', 'name', 'type', 'dobOrIncDate', 'email', 'phone',
+          'address', 'city', 'state', 'pinCode', 'pan', 'gstin', 'tan', 'financialYear',
+          'services', 'assignedEmployeeId', 'onboardingDate', 'notes', 'status',
+          'requiredCategories', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.clientCode, 1, 32) &&
+        isStr(data.name, 1, 160) &&
+        data.type in ['Individual', 'Private Limited', 'Partnership', 'LLP', 'Proprietorship'] &&
+        isStr(data.dobOrIncDate, 0, 30) &&
+        isStr(data.email, 0, 200) &&
+        isStr(data.phone, 0, 40) &&
+        isStr(data.address, 0, 300) &&
+        isStr(data.city, 0, 80) &&
+        isStr(data.state, 0, 80) &&
+        isStr(data.pinCode, 0, 20) &&
+        isStr(data.pan, 0, 20) &&
+        isOptStr(data, 'gstin', 30) &&
+        isOptStr(data, 'tan', 30) &&
+        data.financialYear in ['FY 2026-27', 'FY 2025-26', 'FY 2024-25'] &&
+        isBoundedList(data.services, 25) &&
+        isStr(data.assignedEmployeeId, 0, 128) &&
+        isStr(data.onboardingDate, 0, 30) &&
+        isStr(data.notes, 0, 2000) &&
+        data.status in ['Active', 'Inactive', 'Archived'] &&
+        isBoundedList(data.requiredCategories, 25) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDocument(data, firmId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'name', 'fileType', 'fileSize', 'clientId', 'category',
+          'financialYear', 'uploadedBy', 'uploadedByRole', 'uploadDate', 'status',
+          'previewSummary', 'comments', 'history', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'name', 'fileType', 'fileSize', 'clientId', 'category',
+          'financialYear', 'uploadedBy', 'uploadedByRole', 'uploadDate', 'status',
+          'previewSummary', 'extractedMetrics', 'comments', 'history', 'linkedRequestId',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.name, 1, 240) &&
+        data.fileType in ['PDF', 'XLSX', 'JPG', 'PNG', 'CSV'] &&
+        isStr(data.fileSize, 0, 40) &&
+        isStr(data.clientId, 1, 128) &&
+        isStr(data.category, 1, 80) &&
+        data.financialYear in ['FY 2026-27', 'FY 2025-26', 'FY 2024-25'] &&
+        isStr(data.uploadedBy, 1, 160) &&
+        data.uploadedByRole in ['Client', 'Staff'] &&
+        isStr(data.uploadDate, 1, 30) &&
+        data.status in ['Uploaded', 'Pending Review', 'Verified', 'Rejected', 'Replacement Required'] &&
+        isStr(data.previewSummary, 0, 3000) &&
+        (!('extractedMetrics' in data) || data.extractedMetrics is map) &&
+        isBoundedList(data.comments, 50) &&
+        isBoundedList(data.history, 50) &&
+        isOptStr(data, 'linkedRequestId', 128) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidComplianceTask(data, firmId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'title', 'clientId', 'type', 'financialYear', 'dueDate',
+          'assignedEmployeeId', 'status', 'priority', 'description', 'requiredDocuments',
+          'reminderDaysBefore', 'progressHistory', 'internalNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'title', 'clientId', 'type', 'financialYear', 'dueDate',
+          'assignedEmployeeId', 'status', 'priority', 'description', 'requiredDocuments',
+          'reminderDaysBefore', 'completionDate', 'progressHistory', 'internalNotes',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.title, 1, 200) &&
+        isStr(data.clientId, 1, 128) &&
+        isStr(data.type, 1, 80) &&
+        data.financialYear in ['FY 2026-27', 'FY 2025-26', 'FY 2024-25'] &&
+        isStr(data.dueDate, 1, 30) &&
+        isStr(data.assignedEmployeeId, 0, 128) &&
+        data.status in ['Not Started', 'In Progress', 'Awaiting Documents', 'Under Review', 'Completed', 'Overdue'] &&
+        data.priority in ['Low', 'Medium', 'High', 'Urgent'] &&
+        isStr(data.description, 0, 2000) &&
+        isBoundedList(data.requiredDocuments, 25) &&
+        data.reminderDaysBefore is number &&
+        isOptStr(data, 'completionDate', 30) &&
+        isBoundedList(data.progressHistory, 50) &&
+        isStr(data.internalNotes, 0, 2000) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStaffTask(data, firmId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'title', 'description', 'clientId', 'assignedEmployeeId',
+          'createdBy', 'priority', 'startDate', 'dueDate', 'status', 'attachments',
+          'comments', 'timeline', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'title', 'description', 'clientId', 'assignedEmployeeId',
+          'createdBy', 'priority', 'startDate', 'dueDate', 'relatedComplianceId',
+          'status', 'attachments', 'comments', 'timeline', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.title, 1, 200) &&
+        isStr(data.description, 0, 3000) &&
+        isStr(data.clientId, 1, 128) &&
+        isStr(data.assignedEmployeeId, 0, 128) &&
+        isStr(data.createdBy, 1, 160) &&
+        data.priority in ['Low', 'Medium', 'High', 'Urgent'] &&
+        isStr(data.startDate, 1, 30) &&
+        isStr(data.dueDate, 1, 30) &&
+        isOptStr(data, 'relatedComplianceId', 128) &&
+        data.status in ['Not Started', 'In Progress', 'Awaiting Client', 'Under Review', 'Completed'] &&
+        isBoundedList(data.attachments, 25) &&
+        isBoundedList(data.comments, 50) &&
+        isBoundedList(data.timeline, 50) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDocRequest(data, firmId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'clientId', 'title', 'category', 'financialYear',
+          'requestedBy', 'requestedDate', 'dueDate', 'status', 'message', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'clientId', 'title', 'category', 'financialYear',
+          'requestedBy', 'requestedDate', 'dueDate', 'status', 'message',
+          'linkedDocumentId', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.clientId, 1, 128) &&
+        isStr(data.title, 1, 200) &&
+        isStr(data.category, 1, 80) &&
+        data.financialYear in ['FY 2026-27', 'FY 2025-26', 'FY 2024-25'] &&
+        isStr(data.requestedBy, 1, 160) &&
+        isStr(data.requestedDate, 1, 30) &&
+        isStr(data.dueDate, 1, 30) &&
+        data.status in ['Sent to Client', 'Uploaded by Client', 'Under CA Review', 'Verified', 'Correction Requested'] &&
+        isStr(data.message, 0, 2000) &&
+        isOptStr(data, 'linkedDocumentId', 128) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'title', 'message', 'type', 'read', 'timestamp', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'title', 'message', 'type', 'read', 'timestamp', 'linkSection', 'clientId', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.title, 1, 200) &&
+        isStr(data.message, 0, 1000) &&
+        data.type in ['document', 'compliance', 'task', 'system'] &&
+        data.read is bool &&
+        isStr(data.timestamp, 1, 40) &&
+        isOptStr(data, 'linkSection', 40) &&
+        isOptStr(data, 'clientId', 128) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReminder(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'title', 'clientId', 'reminderType', 'channel', 'scheduledFor', 'status', 'message', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'title', 'clientId', 'reminderType', 'channel', 'scheduledFor', 'status', 'message', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.title, 1, 200) &&
+        isStr(data.clientId, 1, 128) &&
+        data.reminderType in ['Document Follow-up', 'Compliance Deadline', 'Client Check-in'] &&
+        data.channel in ['Email (Simulated)', 'WhatsApp (Simulated)', 'Portal Alert'] &&
+        isStr(data.scheduledFor, 1, 40) &&
+        data.status in ['Scheduled', 'Sent (Simulated)', 'Overdue'] &&
+        isStr(data.message, 0, 2000) &&
+        isStr(data.createdBy, 1, 160) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCommunication(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'clientId', 'direction', 'channel', 'subject', 'message', 'sender', 'timestamp', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'clientId', 'direction', 'channel', 'subject', 'message', 'sender', 'timestamp', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.clientId, 1, 128) &&
+        data.direction in ['Outbound (CA -> Client)', 'Inbound (Client -> CA)'] &&
+        data.channel in ['Client Portal', 'Email (Simulated)', 'Phone Note'] &&
+        isStr(data.subject, 1, 200) &&
+        isStr(data.message, 0, 3000) &&
+        isStr(data.sender, 1, 160) &&
+        isStr(data.timestamp, 1, 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidValidationIssue(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'clientId', 'title', 'fieldLabel', 'detectedValue', 'expectedFormatOrCrossRef', 'severity', 'status', 'internalComments', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'clientId', 'documentId', 'title', 'fieldLabel', 'detectedValue', 'expectedFormatOrCrossRef', 'severity', 'status', 'internalComments', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.clientId, 1, 128) &&
+        isOptStr(data, 'documentId', 128) &&
+        isStr(data.title, 1, 200) &&
+        isStr(data.fieldLabel, 1, 120) &&
+        isStr(data.detectedValue, 0, 500) &&
+        isStr(data.expectedFormatOrCrossRef, 0, 500) &&
+        data.severity in ['Informational', 'Warning', 'Critical'] &&
+        data.status in ['Open', 'Reviewed', 'Approved', 'Correction Requested', 'Rejected'] &&
+        isBoundedList(data.internalComments, 50) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCrossComparison(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'clientId', 'metric', 'sourceAName', 'sourceAValue', 'sourceBName', 'sourceBValue', 'varianceStatus', 'notes', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'clientId', 'metric', 'sourceAName', 'sourceAValue', 'sourceBName', 'sourceBValue', 'varianceStatus', 'notes', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.clientId, 1, 128) &&
+        isStr(data.metric, 1, 200) &&
+        isStr(data.sourceAName, 0, 200) &&
+        isStr(data.sourceAValue, 0, 200) &&
+        isStr(data.sourceBName, 0, 200) &&
+        isStr(data.sourceBValue, 0, 200) &&
+        data.varianceStatus in ['Matched', 'Potential Mismatch', 'Missing Info', 'Requires CA Review'] &&
+        isStr(data.notes, 0, 2000) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFinancialRecord(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'clientId', 'financialYear', 'month', 'sourceType', 'revenue', 'expenses', 'taxableValue', 'cgst', 'sgst', 'igst', 'invoiceCount', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'clientId', 'financialYear', 'month', 'sourceType', 'revenue', 'expenses', 'taxableValue', 'cgst', 'sgst', 'igst', 'invoiceCount', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.clientId, 1, 128) &&
+        data.financialYear in ['FY 2026-27', 'FY 2025-26', 'FY 2024-25'] &&
+        isStr(data.month, 1, 40) &&
+        data.sourceType in ['Document-Extracted (Provisional)', 'Finalized Accounting Record'] &&
+        data.revenue is number &&
+        data.expenses is number &&
+        data.taxableValue is number &&
+        data.cgst is number &&
+        data.sgst is number &&
+        data.igst is number &&
+        data.invoiceCount is number &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAnomaly(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'clientId', 'type', 'severity', 'title', 'description', 'sourceARef', 'sourceAValue', 'sourceBRef', 'sourceBValue', 'detectedAt', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'clientId', 'documentId', 'type', 'severity', 'title', 'description', 'sourceARef', 'sourceAValue', 'sourceBRef', 'sourceBValue', 'varianceAmount', 'detectedAt', 'status', 'linkedTaskId', 'caNote', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isStr(data.clientId, 1, 128) &&
+        isOptStr(data, 'documentId', 128) &&
+        isStr(data.type, 1, 100) &&
+        data.severity in ['Informational', 'Warning', 'Critical'] &&
+        isStr(data.title, 1, 200) &&
+        isStr(data.description, 0, 2000) &&
+        isStr(data.sourceARef, 0, 200) &&
+        isStr(data.sourceAValue, 0, 200) &&
+        isStr(data.sourceBRef, 0, 200) &&
+        isStr(data.sourceBValue, 0, 200) &&
+        isOptNum(data, 'varianceAmount') &&
+        isStr(data.detectedAt, 1, 40) &&
+        data.status in ['Flagged for CA Review', 'Task Created', 'Resolved', 'Dismissed'] &&
+        isOptStr(data, 'linkedTaskId', 128) &&
+        isOptStr(data, 'caNote', 1000) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidActivity(data, firmId) {
+      return data.keys().hasAll(['id', 'ownerUid', 'actor', 'action', 'target', 'timestamp', 'section', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'clientId', 'actor', 'action', 'target', 'timestamp', 'section', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.ownerUid == firmId &&
+        isOptStr(data, 'clientId', 128) &&
+        isStr(data.actor, 1, 160) &&
+        isStr(data.action, 1, 240) &&
+        isStr(data.target, 1, 240) &&
+        isStr(data.timestamp, 1, 40) &&
+        isStr(data.section, 1, 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Admins collection (never client-writable)
+    // -------------------------------------------------------------------------
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list, create, update, delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Users Split Collection (Pillar 6: PII Isolation)
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if false;
+      allow create: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidUserPublic(incoming(), userId) &&
+        isOwner(userId) &&
+        incoming().role == 'Partner' &&
+        hasValidTimestampsOnCreate(incoming());
+      allow update: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidUserPublic(incoming(), userId) &&
+        (isOwner(userId) || isAdmin()) &&
+        hasValidTimestampsOnUpdate(incoming()) &&
+        incoming().uid == existing().uid &&
+        (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'department', 'avatarInitials', 'updatedAt'])
+        );
+      allow delete: if false;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && docId == 'info' && (isOwner(userId) || isAdmin());
+        allow list: if false;
+        allow create: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          docId == 'info' &&
+          isValidUserPrivate(incoming(), userId) &&
+          isOwner(userId) &&
+          hasValidTimestampsOnCreate(incoming());
+        allow update: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          docId == 'info' &&
+          isValidUserPrivate(incoming(), userId) &&
+          (isOwner(userId) || isAdmin()) &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phone', 'updatedAt']);
+        allow delete: if false;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Firm Workspace & Master Gate Subcollections
+    // -------------------------------------------------------------------------
+    match /firms/{firmId} {
+      allow get: if isValidId(firmId) && (isOwner(firmId) || isAdmin());
+      allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(firmId) &&
+        isValidFirm(incoming(), firmId) &&
+        isOwner(firmId) &&
+        hasValidTimestampsOnCreate(incoming());
+      allow update: if isVerifiedUser() &&
+        isValidId(firmId) &&
+        isValidFirm(incoming(), firmId) &&
+        (isOwner(firmId) || isAdmin()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        hasValidTimestampsOnUpdate(incoming()) &&
+        (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'firmName', 'tagline', 'address', 'city', 'state', 'pinCode',
+            'icaiRegNo', 'gstin', 'email', 'phone', 'defaultFinancialYear',
+            'availableFinancialYears', 'enabledComplianceCategories', 'enabledDocumentCategories',
+            'notifications', 'preferences', 'permissions', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+
+      match /employees/{employeeId} {
+        allow get: if isValidId(firmId) && isValidId(employeeId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(employeeId) &&
+          isValidEmployee(incoming(), firmId) &&
+          incoming().id == employeeId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(employeeId) &&
+          isValidEmployee(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'email', 'phone', 'department', 'active', 'avatarInitials', 'updatedAt'])
+          );
+        allow delete: if isValidId(firmId) && isValidId(employeeId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /clients/{clientId} {
+        allow get: if isValidId(firmId) && isValidId(clientId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(clientId) &&
+          isValidClient(incoming(), firmId) &&
+          incoming().id == clientId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(clientId) &&
+          isValidClient(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            (
+              existing().status != 'Archived' &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'type', 'dobOrIncDate', 'email', 'phone', 'address', 'city', 'state',
+                'pinCode', 'pan', 'gstin', 'tan', 'financialYear', 'services', 'assignedEmployeeId',
+                'notes', 'status', 'requiredCategories', 'updatedAt'
+              ])
+            )
+          );
+        allow delete: if isValidId(firmId) && isValidId(clientId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /documents/{documentId} {
+        allow get: if isValidId(firmId) && isValidId(documentId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(documentId) &&
+          isValidDocument(incoming(), firmId) &&
+          incoming().id == documentId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId) &&
+          exists(/databases/$(database)/documents/firms/$(firmId)/clients/$(incoming().clientId));
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(documentId) &&
+          isValidDocument(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().clientId == existing().clientId &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'comments', 'history', 'updatedAt'])
+          );
+        allow delete: if isValidId(firmId) && isValidId(documentId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /complianceTasks/{taskId} {
+        allow get: if isValidId(firmId) && isValidId(taskId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(taskId) &&
+          isValidComplianceTask(incoming(), firmId) &&
+          incoming().id == taskId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId) &&
+          exists(/databases/$(database)/documents/firms/$(firmId)/clients/$(incoming().clientId));
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(taskId) &&
+          isValidComplianceTask(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().clientId == existing().clientId &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            (
+              existing().status != 'Completed' &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'title', 'type', 'financialYear', 'dueDate', 'assignedEmployeeId', 'status',
+                'priority', 'description', 'requiredDocuments', 'reminderDaysBefore',
+                'completionDate', 'progressHistory', 'internalNotes', 'updatedAt'
+              ])
+            )
+          );
+        allow delete: if isValidId(firmId) && isValidId(taskId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /staffTasks/{taskId} {
+        allow get: if isValidId(firmId) && isValidId(taskId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(taskId) &&
+          isValidStaffTask(incoming(), firmId) &&
+          incoming().id == taskId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(taskId) &&
+          isValidStaffTask(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            (
+              existing().status != 'Completed' &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'title', 'description', 'assignedEmployeeId', 'priority', 'dueDate',
+                'status', 'attachments', 'comments', 'timeline', 'updatedAt'
+              ])
+            )
+          );
+        allow delete: if isValidId(firmId) && isValidId(taskId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /docRequests/{requestId} {
+        allow get: if isValidId(firmId) && isValidId(requestId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(requestId) &&
+          isValidDocRequest(incoming(), firmId) &&
+          incoming().id == requestId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(requestId) &&
+          isValidDocRequest(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'linkedDocumentId', 'updatedAt'])
+          );
+        allow delete: if isValidId(firmId) && isValidId(requestId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /notifications/{notificationId} {
+        allow get: if isValidId(firmId) && isValidId(notificationId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(notificationId) &&
+          isValidNotification(incoming(), firmId) &&
+          incoming().id == notificationId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(notificationId) &&
+          isValidNotification(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
+        allow delete: if isValidId(firmId) && isValidId(notificationId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /reminders/{reminderId} {
+        allow get: if isValidId(firmId) && isValidId(reminderId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(reminderId) &&
+          isValidReminder(incoming(), firmId) &&
+          incoming().id == reminderId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(reminderId) &&
+          isValidReminder(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          );
+        allow delete: if isValidId(firmId) && isValidId(reminderId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /communications/{commId} {
+        allow get: if isValidId(firmId) && isValidId(commId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(commId) &&
+          isValidCommunication(incoming(), firmId) &&
+          incoming().id == commId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if false;
+        allow delete: if isValidId(firmId) && isValidId(commId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /validationIssues/{issueId} {
+        allow get: if isValidId(firmId) && isValidId(issueId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(issueId) &&
+          isValidValidationIssue(incoming(), firmId) &&
+          incoming().id == issueId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(issueId) &&
+          isValidValidationIssue(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'internalComments', 'updatedAt'])
+          );
+        allow delete: if isValidId(firmId) && isValidId(issueId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /crossComparisons/{compId} {
+        allow get: if isValidId(firmId) && isValidId(compId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(compId) &&
+          isValidCrossComparison(incoming(), firmId) &&
+          incoming().id == compId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(compId) &&
+          isValidCrossComparison(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['varianceStatus', 'notes', 'updatedAt'])
+          );
+        allow delete: if isValidId(firmId) && isValidId(compId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /financialRecords/{recordId} {
+        allow get: if isValidId(firmId) && isValidId(recordId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(recordId) &&
+          isValidFinancialRecord(incoming(), firmId) &&
+          incoming().id == recordId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if false;
+        allow delete: if isValidId(firmId) && isValidId(recordId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /anomalies/{anomalyId} {
+        allow get: if isValidId(firmId) && isValidId(anomalyId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(anomalyId) &&
+          isValidAnomaly(incoming(), firmId) &&
+          incoming().id == anomalyId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(anomalyId) &&
+          isValidAnomaly(incoming(), firmId) &&
+          (isFirmOwner(firmId) || isAdmin()) &&
+          incoming().id == existing().id &&
+          incoming().ownerUid == existing().ownerUid &&
+          hasValidTimestampsOnUpdate(incoming()) &&
+          (
+            isAdmin() ||
+            (
+              !(existing().status in ['Resolved', 'Dismissed']) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'caNote', 'linkedTaskId', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(firmId) && isValidId(anomalyId) && (isFirmOwner(firmId) || isAdmin());
+      }
+
+      match /activities/{activityId} {
+        allow get: if isValidId(firmId) && isValidId(activityId) && (isFirmOwner(firmId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isValidId(firmId) &&
+          isValidId(activityId) &&
+          isValidActivity(incoming(), firmId) &&
+          incoming().id == activityId &&
+          hasValidTimestampsOnCreate(incoming()) &&
+          isFirmOwner(firmId);
+        allow update: if false;
+        allow delete: if isValidId(firmId) && isValidId(activityId) && (isFirmOwner(firmId) || isAdmin());
+      }
+    }
+  }
+}

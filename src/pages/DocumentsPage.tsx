@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   UploadCloud,
   Search,
@@ -41,11 +41,17 @@ export const DocumentsPage: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [uploadClient, setUploadClient] = useState(clients[0]?.id || 'cli-1');
+  const [uploadClient, setUploadClient] = useState(clients[0]?.id || '');
   const [uploadFy, setUploadFy] = useState<FinancialYear>(selectedFY);
   const [uploadCategory, setUploadCategory] = useState<DocumentCategory>('Bank Statements');
   const [dragActive, setDragActive] = useState(false);
   const [uploadError, setUploadError] = useState('');
+
+  useEffect(() => {
+    if (!uploadClient || !clients.some((c) => c.id === uploadClient)) {
+      setUploadClient(clients[0]?.id || '');
+    }
+  }, [clients, uploadClient]);
 
   const [search, setSearch] = useState('');
   const [filterClient, setFilterClient] = useState('All');
@@ -66,6 +72,10 @@ export const DocumentsPage: React.FC = () => {
   const validateAndAddFiles = (files: FileList | null) => {
     setUploadError('');
     if (!files || files.length === 0) return;
+    if (!uploadClient || !clients.some((c) => c.id === uploadClient)) {
+      setUploadError('Please onboard at least one client before uploading documents.');
+      return;
+    }
 
     Array.from(files).forEach((file) => {
       const ext = file.name.split('.').pop()?.toLowerCase() || '';
@@ -104,12 +114,16 @@ export const DocumentsPage: React.FC = () => {
         uploadedBy: currentUser.name,
         uploadedByRole: 'Staff',
         status: 'Pending Review',
-        previewSummary: `Frontend demo file entry (${file.name}, ${sizeStr}) recorded locally in browser storage.`,
+        previewSummary: `Document record (${file.name}, ${sizeStr}) saved to FinSight Cloud Firestore.`,
       });
     });
   };
 
   const handleSampleUpload = () => {
+    if (!uploadClient || !clients.some((c) => c.id === uploadClient)) {
+      addToast('Client required', 'Please onboard a client first before adding documents.', 'warning');
+      return;
+    }
     const client = clients.find((c) => c.id === uploadClient);
     const shortName = (client?.name || 'Client').replace(/[^A-Za-z0-9]/g, '_').slice(0, 18);
     const catSlug = uploadCategory.replace(/[^A-Za-z0-9]/g, '_');
@@ -123,7 +137,7 @@ export const DocumentsPage: React.FC = () => {
       uploadedBy: currentUser.name,
       uploadedByRole: 'Staff',
       status: 'Pending Review',
-      previewSummary: `Generated demo placeholder for ${client?.name} (${uploadCategory}, ${uploadFy}).`,
+      previewSummary: `Generated entry for ${client?.name} (${uploadCategory}, ${uploadFy}).`,
     });
   };
 

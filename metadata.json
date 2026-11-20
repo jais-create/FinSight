@@ -1,7 +1,9 @@
 {
   "name": "FinSight — CA Practice & Compliance Management",
   "description": "Smart CA Practice & Compliance Management System for A Y & COMPANY – Chartered Accountants, Jaipur.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "camera"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

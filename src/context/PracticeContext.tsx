@@ -1,23 +1,36 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import {
-  SEED_ACTIVITIES,
-  SEED_ANOMALIES,
-  SEED_CLIENTS,
-  SEED_COMMUNICATIONS,
-  SEED_COMPLIANCE,
-  SEED_CROSS_COMPARISONS,
-  SEED_DOCUMENTS,
-  SEED_DOC_REQUESTS,
-  SEED_EMPLOYEES,
-  SEED_FINANCIAL_RECORDS,
-  SEED_FIRM_SETTINGS,
-  SEED_NOTIFICATIONS,
-  SEED_PERMISSIONS,
-  SEED_REMINDERS,
-  SEED_STAFF_TASKS,
-  SEED_VALIDATION_ISSUES,
+  User,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+} from 'firebase/auth';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+  writeBatch,
+} from 'firebase/firestore';
+import {
+  DEFAULT_FIRM_SETTINGS,
+  DEFAULT_PERMISSIONS,
   SMART_ONBOARDING_CHECKLISTS,
-} from '../data/seedData';
+} from '../data/practiceDefaults';
+import {
+  OperationType,
+  auth,
+  db,
+  googleProvider,
+  handleFirestoreError,
+  stripUndefined,
+} from '../lib/firebase';
 import {
   ActivityLog,
   AppNotification,
@@ -47,9 +60,16 @@ import {
   ValidationIssue,
 } from '../types';
 
-const STORAGE_KEY = 'finsight_ayco_practice_v1';
+interface PracticeContextValue {
+  // Auth & Workspace status
+  authReady: boolean;
+  firebaseUser: User | null;
+  authError: string | null;
+  firestoreReady: boolean;
+  signInWithGoogle: () => Promise<void>;
+  signOutUser: () => Promise<void>;
 
-interface PersistedState {
+  // Persisted Firestore Collections
   clients: Client[];
   documents: DocumentRecord[];
   complianceTasks: ComplianceTask[];
@@ -69,47 +89,8 @@ interface PersistedState {
   selectedFY: FinancialYear;
   currentEmployeeId: string;
   previewClientId: string;
-}
 
-function loadInitialState(): PersistedState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.clients) && parsed.clients.length > 0) {
-        return {
-          ...parsed,
-          anomalies: Array.isArray(parsed.anomalies) ? parsed.anomalies : SEED_ANOMALIES,
-        };
-      }
-    }
-  } catch {
-    // fallback to seed
-  }
-  return {
-    clients: SEED_CLIENTS,
-    documents: SEED_DOCUMENTS,
-    complianceTasks: SEED_COMPLIANCE,
-    staffTasks: SEED_STAFF_TASKS,
-    docRequests: SEED_DOC_REQUESTS,
-    notifications: SEED_NOTIFICATIONS,
-    reminders: SEED_REMINDERS,
-    communications: SEED_COMMUNICATIONS,
-    validationIssues: SEED_VALIDATION_ISSUES,
-    crossComparisons: SEED_CROSS_COMPARISONS,
-    financialRecords: SEED_FINANCIAL_RECORDS,
-    anomalies: SEED_ANOMALIES,
-    activities: SEED_ACTIVITIES,
-    employees: SEED_EMPLOYEES,
-    permissions: SEED_PERMISSIONS,
-    settings: SEED_FIRM_SETTINGS,
-    selectedFY: 'FY 2026-27',
-    currentEmployeeId: 'emp-1',
-    previewClientId: 'cli-1',
-  };
-}
-
-interface PracticeContextValue extends PersistedState {
+  // Navigation & UI state
   activeSection: NavSection;
   setActiveSection: (section: NavSection) => void;
   selectedClientId: string | null;
@@ -165,6 +146,7 @@ interface PracticeContextValue extends PersistedState {
 
   // Client mutations
   addClient: (client: Omit<Client, 'id' | 'clientCode'>) => Client;
+  addClientAsync: (client: Omit<Client, 'id' | 'clientCode'>) => Promise<Client>;
   updateClient: (id: string, patch: Partial<Client>) => void;
   setClientStatus: (id: string, status: ClientStatus) => void;
 
@@ -217,7 +199,11 @@ interface PracticeContextValue extends PersistedState {
   updateSettings: (patch: Partial<FirmSettings>) => void;
   addEmployee: (emp: Omit<Employee, 'id' | 'avatarInitials'>) => void;
   updateEmployee: (id: string, patch: Partial<Employee>) => void;
-  updatePermission: (role: RolePermission['role'], field: keyof Omit<RolePermission, 'role'>, val: boolean) => void;
+  updatePermission: (
+    role: RolePermission['role'],
+    field: keyof Omit<RolePermission, 'role'>,
+    val: boolean
+  ) => void;
   resetDemoData: () => void;
   logoutDemoSession: () => void;
   demoLocked: boolean;
@@ -233,8 +219,47 @@ const nowTimestamp = () => {
 
 const todayDate = () => new Date().toISOString().slice(0, 10);
 
+const makeId = (prefix: string) =>
+  `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+function computeInitials(name: string): string {
+  const cleaned = name.replace(/^CA\s+/i, '').trim();
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'CA';
+  return parts
+    .map((p) => p[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+}
+
 export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [state, setState] = useState<PersistedState>(loadInitialState);
+  const [authReady, setAuthReady] = useState(false);
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [firestoreReady, setFirestoreReady] = useState(false);
+
+  const [clients, setClients] = useState<Client[]>([]);
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [complianceTasks, setComplianceTasks] = useState<ComplianceTask[]>([]);
+  const [staffTasks, setStaffTasks] = useState<StaffTask[]>([]);
+  const [docRequests, setDocRequests] = useState<DocumentRequest[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [reminders, setReminders] = useState<ScheduledReminder[]>([]);
+  const [communications, setCommunications] = useState<CommunicationLog[]>([]);
+  const [validationIssues, setValidationIssues] = useState<ValidationIssue[]>([]);
+  const [crossComparisons, setCrossComparisons] = useState<CrossDocumentComparison[]>([]);
+  const [financialRecords, setFinancialRecords] = useState<FinancialSummaryRecord[]>([]);
+  const [anomalies, setAnomalies] = useState<FinancialAnomaly[]>([]);
+  const [activities, setActivities] = useState<ActivityLog[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [permissions, setPermissions] = useState<RolePermission[]>(DEFAULT_PERMISSIONS);
+  const [settings, setSettings] = useState<FirmSettings>(DEFAULT_FIRM_SETTINGS);
+
+  const [selectedFY, setSelectedFY] = useState<FinancialYear>('FY 2026-27');
+  const [currentEmployeeId, setCurrentEmployeeId] = useState<string>('');
+  const [previewClientId, setPreviewClientId] = useState<string>('');
+
   const [activeSection, setActiveSectionState] = useState<NavSection>('dashboard');
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -248,26 +273,6 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   >(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [queuedCopilotPrompt, setQueuedCopilotPrompt] = useState<string | null>(null);
-  const [demoLocked, setDemoLocked] = useState(false);
-
-  const openCopilotWithPrompt = (prompt?: string) => {
-    if (prompt) setQueuedCopilotPrompt(prompt);
-    setCopilotOpen(true);
-  };
-  const clearQueuedCopilotPrompt = () => setQueuedCopilotPrompt(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // ignore storage quota errors
-    }
-  }, [state]);
-
-  const currentUser = useMemo(
-    () => state.employees.find((e) => e.id === state.currentEmployeeId) || state.employees[0],
-    [state.employees, state.currentEmployeeId]
-  );
 
   const addToast = (
     title: string,
@@ -283,6 +288,358 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const dismissToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  const openCopilotWithPrompt = (prompt?: string) => {
+    if (prompt) setQueuedCopilotPrompt(prompt);
+    setCopilotOpen(true);
+  };
+  const clearQueuedCopilotPrompt = () => setQueuedCopilotPrompt(null);
+
+  // Firebase Auth listener
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+      setAuthReady(true);
+      if (!user) {
+        setFirestoreReady(false);
+        setClients([]);
+        setDocuments([]);
+        setComplianceTasks([]);
+        setStaffTasks([]);
+        setDocRequests([]);
+        setNotifications([]);
+        setReminders([]);
+        setCommunications([]);
+        setValidationIssues([]);
+        setCrossComparisons([]);
+        setFinancialRecords([]);
+        setAnomalies([]);
+        setActivities([]);
+        setEmployees([]);
+        setPermissions(DEFAULT_PERMISSIONS);
+        setSettings(DEFAULT_FIRM_SETTINGS);
+        setCurrentEmployeeId('');
+        setPreviewClientId('');
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Bootstrap user + firm document & attach Firestore real-time listeners once authenticated
+  useEffect(() => {
+    if (!authReady || !firebaseUser) return;
+
+    const uid = firebaseUser.uid;
+    let cancelled = false;
+    const unsubs: Array<() => void> = [];
+
+    const initAndSubscribe = async () => {
+      try {
+        const displayName = (
+          firebaseUser.displayName ||
+          firebaseUser.email?.split('@')[0] ||
+          'CA Partner'
+        ).slice(0, 120);
+        const initials = computeInitials(displayName);
+        const email = (firebaseUser.email || '').slice(0, 200);
+
+        // 1. User public & private PII split docs
+        const userPubRef = doc(db, 'users', uid);
+        const userPubSnap = await getDoc(userPubRef).catch((err) =>
+          handleFirestoreError(err, OperationType.GET, `users/${uid}`)
+        );
+        if (!userPubSnap.exists()) {
+          await setDoc(
+            userPubRef,
+            stripUndefined({
+              uid,
+              displayName,
+              role: 'Partner',
+              department: 'Practice Management',
+              avatarInitials: initials,
+              active: true,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          ).catch((err) => handleFirestoreError(err, OperationType.CREATE, `users/${uid}`));
+        }
+
+        const userPrivRef = doc(db, 'users', uid, 'private', 'info');
+        const userPrivSnap = await getDoc(userPrivRef).catch((err) =>
+          handleFirestoreError(err, OperationType.GET, `users/${uid}/private/info`)
+        );
+        if (!userPrivSnap.exists()) {
+          await setDoc(
+            userPrivRef,
+            stripUndefined({
+              uid,
+              email,
+              phone: '',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          ).catch((err) =>
+            handleFirestoreError(err, OperationType.CREATE, `users/${uid}/private/info`)
+          );
+        }
+
+        // 2. Firm workspace root doc
+        const firmRef = doc(db, 'firms', uid);
+        const firmSnap = await getDoc(firmRef).catch((err) =>
+          handleFirestoreError(err, OperationType.GET, `firms/${uid}`)
+        );
+        if (!firmSnap.exists()) {
+          await setDoc(
+            firmRef,
+            stripUndefined({
+              ownerUid: uid,
+              ...DEFAULT_FIRM_SETTINGS,
+              email: email || DEFAULT_FIRM_SETTINGS.email,
+              permissions: DEFAULT_PERMISSIONS,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          ).catch((err) => handleFirestoreError(err, OperationType.CREATE, `firms/${uid}`));
+        }
+
+        // 3. Default Employee profile for the signed-in user
+        const empRef = doc(db, 'firms', uid, 'employees', uid);
+        const empSnap = await getDoc(empRef).catch((err) =>
+          handleFirestoreError(err, OperationType.GET, `firms/${uid}/employees/${uid}`)
+        );
+        if (!empSnap.exists()) {
+          await setDoc(
+            empRef,
+            stripUndefined({
+              id: uid,
+              ownerUid: uid,
+              name: displayName,
+              role: 'Partner',
+              email,
+              phone: '',
+              department: 'Practice Management',
+              active: true,
+              avatarInitials: initials,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })
+          ).catch((err) =>
+            handleFirestoreError(err, OperationType.CREATE, `firms/${uid}/employees/${uid}`)
+          );
+        }
+
+        if (cancelled) return;
+        setCurrentEmployeeId((prev) => prev || uid);
+
+        // Subscribe to Firm doc
+        unsubs.push(
+          onSnapshot(
+            firmRef,
+            (snap) => {
+              if (!snap.exists()) return;
+              const data = snap.data();
+              setSettings({
+                firmName: data.firmName || DEFAULT_FIRM_SETTINGS.firmName,
+                tagline: data.tagline ?? DEFAULT_FIRM_SETTINGS.tagline,
+                address: data.address ?? DEFAULT_FIRM_SETTINGS.address,
+                city: data.city ?? DEFAULT_FIRM_SETTINGS.city,
+                state: data.state ?? DEFAULT_FIRM_SETTINGS.state,
+                pinCode: data.pinCode ?? DEFAULT_FIRM_SETTINGS.pinCode,
+                icaiRegNo: data.icaiRegNo ?? '',
+                gstin: data.gstin ?? '',
+                email: data.email ?? '',
+                phone: data.phone ?? '',
+                defaultFinancialYear:
+                  data.defaultFinancialYear || DEFAULT_FIRM_SETTINGS.defaultFinancialYear,
+                availableFinancialYears:
+                  data.availableFinancialYears || DEFAULT_FIRM_SETTINGS.availableFinancialYears,
+                enabledComplianceCategories:
+                  data.enabledComplianceCategories ||
+                  DEFAULT_FIRM_SETTINGS.enabledComplianceCategories,
+                enabledDocumentCategories:
+                  data.enabledDocumentCategories ||
+                  DEFAULT_FIRM_SETTINGS.enabledDocumentCategories,
+                notifications: data.notifications || DEFAULT_FIRM_SETTINGS.notifications,
+                preferences: data.preferences || DEFAULT_FIRM_SETTINGS.preferences,
+              });
+              if (Array.isArray(data.permissions)) {
+                setPermissions(data.permissions as RolePermission[]);
+              }
+            },
+            (err) => handleFirestoreError(err, OperationType.GET, `firms/${uid}`)
+          )
+        );
+
+        const subCol = <T,>(
+          colName: string,
+          setter: React.Dispatch<React.SetStateAction<T[]>>,
+          sortByField?: keyof T
+        ) => {
+          const path = `firms/${uid}/${colName}`;
+          const q = query(collection(db, 'firms', uid, colName), where('ownerUid', '==', uid));
+          unsubs.push(
+            onSnapshot(
+              q,
+              (snap) => {
+                const rows = snap.docs.map((d) => d.data() as T);
+                if (sortByField) {
+                  rows.sort((a, b) =>
+                    String(b[sortByField] ?? '').localeCompare(String(a[sortByField] ?? ''))
+                  );
+                }
+                setter(rows);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, path)
+            )
+          );
+        };
+
+        subCol<Employee>('employees', setEmployees);
+        subCol<Client>('clients', setClients, 'onboardingDate');
+        subCol<DocumentRecord>('documents', setDocuments, 'uploadDate');
+        subCol<ComplianceTask>('complianceTasks', setComplianceTasks);
+        subCol<StaffTask>('staffTasks', setStaffTasks, 'startDate');
+        subCol<DocumentRequest>('docRequests', setDocRequests, 'requestedDate');
+        subCol<AppNotification>('notifications', setNotifications, 'timestamp');
+        subCol<ScheduledReminder>('reminders', setReminders, 'scheduledFor');
+        subCol<CommunicationLog>('communications', setCommunications, 'timestamp');
+        subCol<ValidationIssue>('validationIssues', setValidationIssues);
+        subCol<CrossDocumentComparison>('crossComparisons', setCrossComparisons);
+        subCol<FinancialSummaryRecord>('financialRecords', setFinancialRecords);
+        subCol<FinancialAnomaly>('anomalies', setAnomalies, 'detectedAt');
+        subCol<ActivityLog>('activities', setActivities, 'timestamp');
+
+        setFirestoreReady(true);
+      } catch (err) {
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : 'Failed to initialize Firestore workspace.';
+          setAuthError(msg);
+        }
+      }
+    };
+
+    void initAndSubscribe();
+
+    return () => {
+      cancelled = true;
+      unsubs.forEach((u) => u());
+    };
+  }, [authReady, firebaseUser]);
+
+  // Keep previewClientId pointing at a valid client whenever clients change
+  useEffect(() => {
+    if (clients.length > 0 && !clients.some((c) => c.id === previewClientId)) {
+      setPreviewClientId(clients[0].id);
+    } else if (clients.length === 0 && previewClientId) {
+      setPreviewClientId('');
+    }
+  }, [clients, previewClientId]);
+
+  const signInWithGoogle = async () => {
+    setAuthError(null);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Google Sign-In failed.';
+      setAuthError(msg);
+      addToast('Sign-In Failed', msg, 'error');
+    }
+  };
+
+  const signOutUser = async () => {
+    try {
+      await signOut(auth);
+      addToast('Signed out', 'Your FinSight Firebase session has ended.', 'info');
+    } catch (err) {
+      addToast(
+        'Sign-out Error',
+        err instanceof Error ? err.message : 'Could not sign out cleanly.',
+        'error'
+      );
+    }
+  };
+
+  const currentUser: Employee = useMemo(() => {
+    const found = employees.find((e) => e.id === currentEmployeeId) || employees[0];
+    if (found) return found;
+    const fallbackName =
+      firebaseUser?.displayName || firebaseUser?.email?.split('@')[0] || 'CA Partner';
+    return {
+      id: firebaseUser?.uid || 'emp-pending',
+      name: fallbackName,
+      role: 'Partner',
+      email: firebaseUser?.email || '',
+      phone: '',
+      department: 'Practice Management',
+      active: true,
+      avatarInitials: computeInitials(fallbackName),
+    };
+  }, [employees, currentEmployeeId, firebaseUser]);
+
+  const firmUid = firebaseUser?.uid || '';
+
+  const logActivity = async (
+    action: string,
+    target: string,
+    section: NavSection,
+    clientId?: string,
+    actorOverride?: string
+  ) => {
+    if (!firmUid) return;
+    const id = makeId('act');
+    const path = `firms/${firmUid}/activities/${id}`;
+    try {
+      await setDoc(
+        doc(db, 'firms', firmUid, 'activities', id),
+        stripUndefined({
+          id,
+          ownerUid: firmUid,
+          clientId,
+          actor: (actorOverride || currentUser.name).slice(0, 160),
+          action: action.slice(0, 240),
+          target: target.slice(0, 240),
+          timestamp: nowTimestamp(),
+          section,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, path);
+    }
+  };
+
+  const pushNotification = async (
+    title: string,
+    message: string,
+    type: AppNotification['type'],
+    linkSection?: NavSection,
+    clientId?: string
+  ) => {
+    if (!firmUid) return;
+    const id = makeId('ntf');
+    const path = `firms/${firmUid}/notifications/${id}`;
+    try {
+      await setDoc(
+        doc(db, 'firms', firmUid, 'notifications', id),
+        stripUndefined({
+          id,
+          ownerUid: firmUid,
+          title: title.slice(0, 200),
+          message: message.slice(0, 1000),
+          type,
+          read: false,
+          timestamp: nowTimestamp(),
+          linkSection,
+          clientId,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, path);
+    }
   };
 
   const setActiveSection = (section: NavSection) => {
@@ -310,28 +667,10 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setQuickAddOpen(true);
   };
 
-  const appendActivity = (
-    prev: PersistedState,
-    action: string,
-    target: string,
-    section: NavSection,
-    clientId?: string,
-    actorOverride?: string
-  ): ActivityLog[] => {
-    const entry: ActivityLog = {
-      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-      clientId,
-      actor: actorOverride || currentUser.name,
-      action,
-      target,
-      timestamp: nowTimestamp(),
-      section,
-    };
-    return [entry, ...prev.activities].slice(0, 40);
-  };
-
-  const addClient = (clientInput: Omit<Client, 'id' | 'clientCode'>): Client => {
-    const nextNum = 101 + state.clients.length;
+  const createClientWithCommit = (
+    clientInput: Omit<Client, 'id' | 'clientCode'>
+  ): { client: Client; commitPromise: Promise<void> } => {
+    const nextNum = 101 + clients.length;
     const template = SMART_ONBOARDING_CHECKLISTS[clientInput.type];
     const resolvedRequired =
       clientInput.requiredCategories.length > 0
@@ -344,93 +683,149 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ...clientInput,
       requiredCategories: resolvedRequired,
       services: resolvedServices,
-      id: `cli-${Date.now()}`,
+      id: makeId('cli'),
       clientCode: `AYC-${nextNum}`,
     };
 
-    const onboardingTask: StaffTask = {
-      id: `tsk-onb-${Date.now()}`,
-      title: `Smart Onboarding Pack — ${newClient.name}`,
-      description: `Execute ${newClient.type} onboarding checklist:\n• ${template.onboardingSteps.join('\n• ')}`,
-      clientId: newClient.id,
-      assignedEmployeeId: newClient.assignedEmployeeId,
-      createdBy: currentUser.name,
-      priority: 'High',
-      startDate: todayDate(),
-      dueDate: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10),
-      status: 'Not Started',
-      attachments: [],
-      comments: [],
-      timeline: [
-        {
-          id: `tl-onb-${Date.now()}`,
-          event: `Auto-generated Smart Onboarding workflow (${resolvedRequired.length} required doc categories)`,
-          actor: 'FinSight Onboarding Engine',
-          timestamp: nowTimestamp(),
-        },
-      ],
-    };
+    let commitPromise: Promise<void> = Promise.resolve();
 
-    setState((prev) => ({
-      ...prev,
-      clients: [newClient, ...prev.clients],
-      staffTasks: [onboardingTask, ...prev.staffTasks],
-      activities: appendActivity(
-        prev,
-        `onboarded new ${newClient.type} client (${resolvedRequired.length} doc checklist)`,
-        newClient.name,
-        'clients',
-        newClient.id
-      ),
-      notifications: [
-        {
-          id: `ntf-${Date.now()}`,
-          title: `New Client Onboarded — ${newClient.name}`,
+    if (firmUid) {
+      const onboardingTaskId = makeId('tsk-onb');
+      const actId = makeId('act');
+      const ntfId = makeId('ntf');
+      const batch = writeBatch(db);
+
+      batch.set(
+        doc(db, 'firms', firmUid, 'clients', newClient.id),
+        stripUndefined({
+          ...newClient,
+          ownerUid: firmUid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      batch.set(
+        doc(db, 'firms', firmUid, 'staffTasks', onboardingTaskId),
+        stripUndefined({
+          id: onboardingTaskId,
+          ownerUid: firmUid,
+          title: `Smart Onboarding Pack — ${newClient.name}`.slice(0, 200),
+          description: `Execute ${newClient.type} onboarding checklist:\n• ${template.onboardingSteps.join('\n• ')}`,
+          clientId: newClient.id,
+          assignedEmployeeId: newClient.assignedEmployeeId || currentUser.id,
+          createdBy: currentUser.name,
+          priority: 'High',
+          startDate: todayDate(),
+          dueDate: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10),
+          status: 'Not Started',
+          attachments: [],
+          comments: [],
+          timeline: [
+            {
+              id: makeId('tl-onb'),
+              event: `Auto-generated Smart Onboarding workflow (${resolvedRequired.length} required doc categories)`,
+              actor: 'FinSight Onboarding Engine',
+              timestamp: nowTimestamp(),
+            },
+          ],
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      batch.set(
+        doc(db, 'firms', firmUid, 'activities', actId),
+        stripUndefined({
+          id: actId,
+          ownerUid: firmUid,
+          clientId: newClient.id,
+          actor: currentUser.name,
+          action: `onboarded new ${newClient.type} client (${resolvedRequired.length} doc checklist)`,
+          target: newClient.name,
+          timestamp: nowTimestamp(),
+          section: 'clients',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      batch.set(
+        doc(db, 'firms', firmUid, 'notifications', ntfId),
+        stripUndefined({
+          id: ntfId,
+          ownerUid: firmUid,
+          title: `New Client Onboarded — ${newClient.name}`.slice(0, 200),
           message: `Client ${newClient.clientCode} assigned to ${
-            prev.employees.find((e) => e.id === newClient.assignedEmployeeId)?.name || 'CA Staff'
+            employees.find((e) => e.id === newClient.assignedEmployeeId)?.name || 'CA Staff'
           } with Smart Onboarding task.`,
           type: 'system',
           read: false,
           timestamp: nowTimestamp(),
           linkSection: 'clients',
           clientId: newClient.id,
-        },
-        ...prev.notifications,
-      ],
-    }));
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      commitPromise = batch.commit().catch((err) => {
+        handleFirestoreError(err, OperationType.WRITE, `firms/${firmUid}/clients/${newClient.id}`);
+        throw err;
+      });
+    }
+
     addToast(
       'Client onboarded',
-      `${newClient.name} (${newClient.clientCode}) created with ${resolvedRequired.length}-item checklist & workflow task.`
+      `${newClient.name} (${newClient.clientCode}) saved to Firestore with ${resolvedRequired.length}-item checklist.`
     );
-    return newClient;
+    return { client: newClient, commitPromise };
+  };
+
+  const addClient = (clientInput: Omit<Client, 'id' | 'clientCode'>): Client => {
+    const { client, commitPromise } = createClientWithCommit(clientInput);
+    void commitPromise.catch(() => undefined);
+    return client;
+  };
+
+  const addClientAsync = async (clientInput: Omit<Client, 'id' | 'clientCode'>): Promise<Client> => {
+    const { client, commitPromise } = createClientWithCommit(clientInput);
+    await commitPromise;
+    return client;
   };
 
   const updateClient = (id: string, patch: Partial<Client>) => {
-    setState((prev) => {
-      const target = prev.clients.find((c) => c.id === id);
-      return {
-        ...prev,
-        clients: prev.clients.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-        activities: target
-          ? appendActivity(prev, 'updated client profile', target.name, 'clients', id)
-          : prev.activities,
-      };
-    });
-    addToast('Client updated', 'Changes saved to browser demo storage.');
+    if (!firmUid) return;
+    const target = clients.find((c) => c.id === id);
+    const path = `firms/${firmUid}/clients/${id}`;
+    updateDoc(
+      doc(db, 'firms', firmUid, 'clients', id),
+      stripUndefined({ ...patch, updatedAt: serverTimestamp() })
+    )
+      .then(() => {
+        if (target) {
+          void logActivity('updated client profile', target.name, 'clients', id);
+        }
+        addToast('Client updated', 'Changes saved to Firestore.');
+      })
+      .catch((err) => handleFirestoreError(err, OperationType.UPDATE, path));
   };
 
   const setClientStatus = (id: string, status: ClientStatus) => {
-    setState((prev) => {
-      const target = prev.clients.find((c) => c.id === id);
-      return {
-        ...prev,
-        clients: prev.clients.map((c) => (c.id === id ? { ...c, status } : c)),
-        activities: target
-          ? appendActivity(prev, `changed client status to ${status}`, target.name, 'clients', id)
-          : prev.activities,
-      };
-    });
-    addToast(`Client marked ${status}`);
+    if (!firmUid) return;
+    const target = clients.find((c) => c.id === id);
+    const path = `firms/${firmUid}/clients/${id}`;
+    updateDoc(doc(db, 'firms', firmUid, 'clients', id), {
+      status,
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => {
+        if (target) {
+          void logActivity(`changed client status to ${status}`, target.name, 'clients', id);
+        }
+        addToast(`Client marked ${status}`);
+      })
+      .catch((err) => handleFirestoreError(err, OperationType.UPDATE, path));
   };
 
   const addDocument = (
@@ -439,12 +834,12 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ): DocumentRecord => {
     const newDoc: DocumentRecord = {
       ...docInput,
-      id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      id: makeId('doc'),
       uploadDate: customDate || todayDate(),
       comments: [],
       history: [
         {
-          id: `h-${Date.now()}`,
+          id: makeId('h'),
           action: `Uploaded by ${docInput.uploadedByRole}`,
           actor: docInput.uploadedBy,
           timestamp: nowTimestamp(),
@@ -452,360 +847,476 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ],
     };
 
-    setState((prev) => {
-      const client = prev.clients.find((c) => c.id === newDoc.clientId);
-      const updatedRequests = newDoc.linkedRequestId
-        ? prev.docRequests.map((r) =>
-            r.id === newDoc.linkedRequestId
-              ? { ...r, status: 'Under CA Review' as const, linkedDocumentId: newDoc.id }
-              : r
-          )
-        : prev.docRequests;
+    if (firmUid) {
+      const client = clients.find((c) => c.id === newDoc.clientId);
+      const batch = writeBatch(db);
+      batch.set(
+        doc(db, 'firms', firmUid, 'documents', newDoc.id),
+        stripUndefined({
+          ...newDoc,
+          ownerUid: firmUid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
 
-      return {
-        ...prev,
-        documents: [newDoc, ...prev.documents],
-        docRequests: updatedRequests,
-        activities: appendActivity(
-          prev,
-          `uploaded ${newDoc.category}`,
-          newDoc.name,
-          'documents',
-          newDoc.clientId,
-          newDoc.uploadedBy
-        ),
-        notifications: [
-          {
-            id: `ntf-${Date.now()}`,
-            title: `New Document Uploaded — ${client?.name || 'Client'}`,
-            message: `${newDoc.name} (${newDoc.category}) is ready for CA review.`,
-            type: 'document',
-            read: false,
-            timestamp: nowTimestamp(),
-            linkSection: 'documents',
-            clientId: newDoc.clientId,
-          },
-          ...prev.notifications,
-        ],
-      };
-    });
-    addToast('Document recorded', `${newDoc.name} added to workspace (local demo storage).`);
+      if (newDoc.linkedRequestId) {
+        batch.update(doc(db, 'firms', firmUid, 'docRequests', newDoc.linkedRequestId), {
+          status: 'Under CA Review',
+          linkedDocumentId: newDoc.id,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      const actId = makeId('act');
+      batch.set(
+        doc(db, 'firms', firmUid, 'activities', actId),
+        stripUndefined({
+          id: actId,
+          ownerUid: firmUid,
+          clientId: newDoc.clientId,
+          actor: newDoc.uploadedBy,
+          action: `uploaded ${newDoc.category}`,
+          target: newDoc.name,
+          timestamp: nowTimestamp(),
+          section: 'documents',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      const ntfId = makeId('ntf');
+      batch.set(
+        doc(db, 'firms', firmUid, 'notifications', ntfId),
+        stripUndefined({
+          id: ntfId,
+          ownerUid: firmUid,
+          title: `New Document Uploaded — ${client?.name || 'Client'}`.slice(0, 200),
+          message: `${newDoc.name} (${newDoc.category}) is ready for CA review.`,
+          type: 'document',
+          read: false,
+          timestamp: nowTimestamp(),
+          linkSection: 'documents',
+          clientId: newDoc.clientId,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      batch
+        .commit()
+        .catch((err) =>
+          handleFirestoreError(err, OperationType.WRITE, `firms/${firmUid}/documents/${newDoc.id}`)
+        );
+    }
+
+    addToast('Document recorded', `${newDoc.name} saved to Firestore.`);
     return newDoc;
   };
 
   const updateDocumentStatus = (docId: string, status: DocumentStatus, note?: string) => {
-    setState((prev) => {
-      const doc = prev.documents.find((d) => d.id === docId);
-      if (!doc) return prev;
-      const client = prev.clients.find((c) => c.id === doc.clientId);
-      const nextDocuments = prev.documents.map((d) => {
-        if (d.id !== docId) return d;
-        return {
-          ...d,
-          status,
-          history: [
-            ...d.history,
-            {
-              id: `h-${Date.now()}`,
-              action: `Marked ${status}`,
-              actor: currentUser.name,
-              timestamp: nowTimestamp(),
-              notes: note,
-            },
-          ],
-          comments: note
-            ? [
-                ...d.comments,
-                {
-                  id: `c-${Date.now()}`,
-                  author: currentUser.name,
-                  role: currentUser.role,
-                  text: note,
-                  timestamp: nowTimestamp(),
-                },
-              ]
-            : d.comments,
-        };
-      });
+    if (!firmUid) return;
+    const targetDoc = documents.find((d) => d.id === docId);
+    if (!targetDoc) return;
+    const client = clients.find((c) => c.id === targetDoc.clientId);
 
-      const nextRequests = prev.docRequests.map((r) => {
-        if (r.linkedDocumentId !== docId && r.id !== doc.linkedRequestId) return r;
-        if (status === 'Verified') return { ...r, status: 'Verified' as const };
-        if (status === 'Rejected' || status === 'Replacement Required') {
-          return { ...r, status: 'Correction Requested' as const };
-        }
-        return { ...r, status: 'Under CA Review' as const };
-      });
+    const nextHistory = [
+      ...targetDoc.history,
+      {
+        id: makeId('h'),
+        action: `Marked ${status}`,
+        actor: currentUser.name,
+        timestamp: nowTimestamp(),
+        ...(note ? { notes: note } : {}),
+      },
+    ].slice(-50);
 
-      return {
-        ...prev,
-        documents: nextDocuments,
-        docRequests: nextRequests,
-        activities: appendActivity(
-          prev,
-          `marked document ${status}`,
-          `${doc.name} (${client?.name || ''})`,
-          'documents',
-          doc.clientId
-        ),
-        notifications: [
+    const nextComments = note
+      ? [
+          ...targetDoc.comments,
           {
-            id: `ntf-${Date.now()}`,
-            title:
-              status === 'Verified'
-                ? `Document Verified — ${client?.name || 'Client'}`
-                : `Document ${status} — ${client?.name || 'Client'}`,
-            message: `${doc.name} was marked ${status} by ${currentUser.name}.`,
-            type: 'document',
-            read: false,
+            id: makeId('c'),
+            author: currentUser.name,
+            role: currentUser.role,
+            text: note,
             timestamp: nowTimestamp(),
-            linkSection: 'documents',
-            clientId: doc.clientId,
           },
-          ...prev.notifications,
-        ],
-      };
+        ].slice(-50)
+      : targetDoc.comments;
+
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'firms', firmUid, 'documents', docId), {
+      status,
+      history: stripUndefined(nextHistory),
+      comments: stripUndefined(nextComments),
+      updatedAt: serverTimestamp(),
     });
-    addToast(`Document ${status}`, note || 'Status synchronized across client profile & reports.');
+
+    docRequests
+      .filter((r) => r.linkedDocumentId === docId || r.id === targetDoc.linkedRequestId)
+      .forEach((r) => {
+        const nextReqStatus =
+          status === 'Verified'
+            ? 'Verified'
+            : status === 'Rejected' || status === 'Replacement Required'
+            ? 'Correction Requested'
+            : 'Under CA Review';
+        batch.update(doc(db, 'firms', firmUid, 'docRequests', r.id), {
+          status: nextReqStatus,
+          updatedAt: serverTimestamp(),
+        });
+      });
+
+    batch
+      .commit()
+      .then(() => {
+        void logActivity(
+          `marked document ${status}`,
+          `${targetDoc.name} (${client?.name || ''})`,
+          'documents',
+          targetDoc.clientId
+        );
+        void pushNotification(
+          status === 'Verified'
+            ? `Document Verified — ${client?.name || 'Client'}`
+            : `Document ${status} — ${client?.name || 'Client'}`,
+          `${targetDoc.name} was marked ${status} by ${currentUser.name}.`,
+          'document',
+          'documents',
+          targetDoc.clientId
+        );
+        addToast(`Document ${status}`, note || 'Status synchronized across client profile & reports.');
+      })
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/documents/${docId}`)
+      );
   };
 
   const addDocumentComment = (docId: string, text: string) => {
-    setState((prev) => ({
-      ...prev,
-      documents: prev.documents.map((d) =>
-        d.id === docId
-          ? {
-              ...d,
-              comments: [
-                ...d.comments,
-                {
-                  id: `c-${Date.now()}`,
-                  author: currentUser.name,
-                  role: currentUser.role,
-                  text,
-                  timestamp: nowTimestamp(),
-                },
-              ],
-            }
-          : d
-      ),
-    }));
-    addToast('Comment added');
+    if (!firmUid) return;
+    const targetDoc = documents.find((d) => d.id === docId);
+    if (!targetDoc) return;
+    const nextComments = [
+      ...targetDoc.comments,
+      {
+        id: makeId('c'),
+        author: currentUser.name,
+        role: currentUser.role,
+        text,
+        timestamp: nowTimestamp(),
+      },
+    ].slice(-50);
+
+    updateDoc(doc(db, 'firms', firmUid, 'documents', docId), {
+      comments: stripUndefined(nextComments),
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => addToast('Comment added'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/documents/${docId}`)
+      );
   };
 
-  const createDocumentRequest = (req: Omit<DocumentRequest, 'id' | 'requestedDate' | 'status'>) => {
-    const newReq: DocumentRequest = {
-      ...req,
-      id: `req-${Date.now()}`,
-      requestedDate: todayDate(),
-      status: 'Sent to Client',
-    };
-    setState((prev) => {
-      const client = prev.clients.find((c) => c.id === req.clientId);
-      return {
-        ...prev,
-        docRequests: [newReq, ...prev.docRequests],
-        communications: [
-          {
-            id: `com-${Date.now()}`,
-            clientId: req.clientId,
-            direction: 'Outbound (CA -> Client)',
-            channel: 'Client Portal',
-            subject: `Document Request: ${req.title}`,
-            message: req.message,
-            sender: req.requestedBy,
-            timestamp: nowTimestamp(),
-          },
-          ...prev.communications,
-        ],
-        activities: appendActivity(
-          prev,
-          'sent document request',
-          `${req.title} (${client?.name || ''})`,
-          'reminders',
-          req.clientId
-        ),
-        notifications: [
-          {
-            id: `ntf-${Date.now()}`,
-            title: `Document Request Sent — ${client?.name || ''}`,
-            message: `Requested ${req.category}: ${req.title}`,
-            type: 'document',
-            read: false,
-            timestamp: nowTimestamp(),
-            linkSection: 'portal',
-            clientId: req.clientId,
-          },
-          ...prev.notifications,
-        ],
-      };
-    });
-    addToast('Document request sent', 'Visible immediately in Client Portal and Reminders.');
+  const createDocumentRequest = (
+    req: Omit<DocumentRequest, 'id' | 'requestedDate' | 'status'>
+  ) => {
+    if (!firmUid) return;
+    const client = clients.find((c) => c.id === req.clientId);
+    const reqId = makeId('req');
+    const comId = makeId('com');
+    const actId = makeId('act');
+    const ntfId = makeId('ntf');
+
+    const batch = writeBatch(db);
+    batch.set(
+      doc(db, 'firms', firmUid, 'docRequests', reqId),
+      stripUndefined({
+        ...req,
+        id: reqId,
+        ownerUid: firmUid,
+        requestedDate: todayDate(),
+        status: 'Sent to Client',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    batch.set(
+      doc(db, 'firms', firmUid, 'communications', comId),
+      stripUndefined({
+        id: comId,
+        ownerUid: firmUid,
+        clientId: req.clientId,
+        direction: 'Outbound (CA -> Client)',
+        channel: 'Client Portal',
+        subject: `Document Request: ${req.title}`.slice(0, 200),
+        message: req.message,
+        sender: req.requestedBy,
+        timestamp: nowTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    batch.set(
+      doc(db, 'firms', firmUid, 'activities', actId),
+      stripUndefined({
+        id: actId,
+        ownerUid: firmUid,
+        clientId: req.clientId,
+        actor: currentUser.name,
+        action: 'sent document request',
+        target: `${req.title} (${client?.name || ''})`,
+        timestamp: nowTimestamp(),
+        section: 'reminders',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    batch.set(
+      doc(db, 'firms', firmUid, 'notifications', ntfId),
+      stripUndefined({
+        id: ntfId,
+        ownerUid: firmUid,
+        title: `Document Request Sent — ${client?.name || ''}`.slice(0, 200),
+        message: `Requested ${req.category}: ${req.title}`,
+        type: 'document',
+        read: false,
+        timestamp: nowTimestamp(),
+        linkSection: 'portal',
+        clientId: req.clientId,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    batch
+      .commit()
+      .then(() => addToast('Document request sent', 'Saved and visible in Client Portal & Reminders.'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.WRITE, `firms/${firmUid}/docRequests/${reqId}`)
+      );
   };
 
   const fulfillDocumentRequest = (requestId: string, docId: string) => {
-    setState((prev) => ({
-      ...prev,
-      docRequests: prev.docRequests.map((r) =>
-        r.id === requestId ? { ...r, status: 'Under CA Review', linkedDocumentId: docId } : r
-      ),
-    }));
+    if (!firmUid) return;
+    updateDoc(doc(db, 'firms', firmUid, 'docRequests', requestId), {
+      status: 'Under CA Review',
+      linkedDocumentId: docId,
+      updatedAt: serverTimestamp(),
+    }).catch((err) =>
+      handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/docRequests/${requestId}`)
+    );
   };
 
   const addComplianceTask = (task: Omit<ComplianceTask, 'id' | 'progressHistory'>) => {
-    const newTask: ComplianceTask = {
-      ...task,
-      id: `cmp-${Date.now()}`,
-      progressHistory: [
-        { id: `ph-${Date.now()}`, note: 'Compliance task created.', actor: currentUser.name, date: todayDate() },
-      ],
-    };
-    setState((prev) => {
-      const client = prev.clients.find((c) => c.id === task.clientId);
-      return {
-        ...prev,
-        complianceTasks: [newTask, ...prev.complianceTasks],
-        activities: appendActivity(
-          prev,
+    if (!firmUid) return;
+    const id = makeId('cmp');
+    const client = clients.find((c) => c.id === task.clientId);
+    setDoc(
+      doc(db, 'firms', firmUid, 'complianceTasks', id),
+      stripUndefined({
+        ...task,
+        id,
+        ownerUid: firmUid,
+        progressHistory: [
+          {
+            id: makeId('ph'),
+            note: 'Compliance task created.',
+            actor: currentUser.name,
+            date: todayDate(),
+          },
+        ],
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => {
+        void logActivity(
           'created compliance task',
-          `${newTask.title} (${client?.name || ''})`,
+          `${task.title} (${client?.name || ''})`,
           'compliance',
           task.clientId
-        ),
-      };
-    });
-    addToast('Compliance task created', task.title);
+        );
+        addToast('Compliance task created', task.title);
+      })
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.CREATE, `firms/${firmUid}/complianceTasks/${id}`)
+      );
   };
 
   const updateComplianceTask = (id: string, patch: Partial<ComplianceTask>) => {
-    setState((prev) => ({
-      ...prev,
-      complianceTasks: prev.complianceTasks.map((t) => (t.id === id ? { ...t, ...patch } : t)),
-    }));
-    addToast('Compliance details updated');
+    if (!firmUid) return;
+    updateDoc(
+      doc(db, 'firms', firmUid, 'complianceTasks', id),
+      stripUndefined({ ...patch, updatedAt: serverTimestamp() })
+    )
+      .then(() => addToast('Compliance details updated'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/complianceTasks/${id}`)
+      );
   };
 
   const updateComplianceStatus = (id: string, status: ComplianceStatus, note?: string) => {
-    setState((prev) => {
-      const target = prev.complianceTasks.find((t) => t.id === id);
-      if (!target) return prev;
-      return {
-        ...prev,
-        complianceTasks: prev.complianceTasks.map((t) =>
-          t.id === id
-            ? {
-                ...t,
-                status,
-                completionDate: status === 'Completed' ? todayDate() : t.completionDate,
-                progressHistory: [
-                  ...t.progressHistory,
-                  {
-                    id: `ph-${Date.now()}`,
-                    note: note || `Status updated to ${status}`,
-                    actor: currentUser.name,
-                    date: todayDate(),
-                  },
-                ],
-              }
-            : t
-        ),
-        activities: appendActivity(
-          prev,
-          `marked compliance ${status}`,
-          target.title,
-          'compliance',
-          target.clientId
-        ),
-      };
-    });
-    addToast(`Compliance marked ${status}`);
+    if (!firmUid) return;
+    const target = complianceTasks.find((t) => t.id === id);
+    if (!target) return;
+
+    const nextHistory = [
+      ...target.progressHistory,
+      {
+        id: makeId('ph'),
+        note: note || `Status updated to ${status}`,
+        actor: currentUser.name,
+        date: todayDate(),
+      },
+    ].slice(-50);
+
+    updateDoc(
+      doc(db, 'firms', firmUid, 'complianceTasks', id),
+      stripUndefined({
+        status,
+        completionDate: status === 'Completed' ? todayDate() : target.completionDate,
+        progressHistory: nextHistory,
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => {
+        void logActivity(`marked compliance ${status}`, target.title, 'compliance', target.clientId);
+        addToast(`Compliance marked ${status}`);
+      })
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/complianceTasks/${id}`)
+      );
   };
 
   const addStaffTask = (task: Omit<StaffTask, 'id' | 'comments' | 'timeline'>) => {
-    const newTask: StaffTask = {
-      ...task,
-      id: `tsk-${Date.now()}`,
-      comments: [],
-      timeline: [
-        { id: `tl-${Date.now()}`, event: 'Task created', actor: currentUser.name, timestamp: nowTimestamp() },
-      ],
-    };
-    setState((prev) => ({
-      ...prev,
-      staffTasks: [newTask, ...prev.staffTasks],
-      activities: appendActivity(prev, 'created staff task', newTask.title, 'tasks', newTask.clientId),
-      notifications: [
-        {
-          id: `ntf-${Date.now()}`,
-          title: 'New Staff Task Assigned',
-          message: `${newTask.title} assigned to ${
-            prev.employees.find((e) => e.id === newTask.assignedEmployeeId)?.name || 'Staff'
-          }.`,
-          type: 'task',
-          read: false,
-          timestamp: nowTimestamp(),
-          linkSection: 'tasks',
-          clientId: newTask.clientId,
-        },
-        ...prev.notifications,
-      ],
-    }));
-    addToast('Task created', newTask.title);
+    if (!firmUid) return;
+    const id = makeId('tsk');
+    const batch = writeBatch(db);
+    batch.set(
+      doc(db, 'firms', firmUid, 'staffTasks', id),
+      stripUndefined({
+        ...task,
+        id,
+        ownerUid: firmUid,
+        comments: [],
+        timeline: [
+          {
+            id: makeId('tl'),
+            event: 'Task created',
+            actor: currentUser.name,
+            timestamp: nowTimestamp(),
+          },
+        ],
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    const actId = makeId('act');
+    batch.set(
+      doc(db, 'firms', firmUid, 'activities', actId),
+      stripUndefined({
+        id: actId,
+        ownerUid: firmUid,
+        clientId: task.clientId,
+        actor: currentUser.name,
+        action: 'created staff task',
+        target: task.title,
+        timestamp: nowTimestamp(),
+        section: 'tasks',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    const ntfId = makeId('ntf');
+    batch.set(
+      doc(db, 'firms', firmUid, 'notifications', ntfId),
+      stripUndefined({
+        id: ntfId,
+        ownerUid: firmUid,
+        title: 'New Staff Task Assigned',
+        message: `${task.title} assigned to ${
+          employees.find((e) => e.id === task.assignedEmployeeId)?.name || 'Staff'
+        }.`,
+        type: 'task',
+        read: false,
+        timestamp: nowTimestamp(),
+        linkSection: 'tasks',
+        clientId: task.clientId,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    batch
+      .commit()
+      .then(() => addToast('Task created', task.title))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.WRITE, `firms/${firmUid}/staffTasks/${id}`)
+      );
   };
 
   const updateStaffTask = (id: string, patch: Partial<StaffTask>) => {
-    setState((prev) => ({
-      ...prev,
-      staffTasks: prev.staffTasks.map((t) => (t.id === id ? { ...t, ...patch } : t)),
-    }));
-    addToast('Task updated');
+    if (!firmUid) return;
+    updateDoc(
+      doc(db, 'firms', firmUid, 'staffTasks', id),
+      stripUndefined({ ...patch, updatedAt: serverTimestamp() })
+    )
+      .then(() => addToast('Task updated'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/staffTasks/${id}`)
+      );
   };
 
   const updateStaffTaskStatus = (id: string, status: StaffTaskStatus) => {
-    setState((prev) => {
-      const target = prev.staffTasks.find((t) => t.id === id);
-      if (!target) return prev;
-      return {
-        ...prev,
-        staffTasks: prev.staffTasks.map((t) =>
-          t.id === id
-            ? {
-                ...t,
-                status,
-                timeline: [
-                  ...t.timeline,
-                  {
-                    id: `tl-${Date.now()}`,
-                    event: `Status changed to ${status}`,
-                    actor: currentUser.name,
-                    timestamp: nowTimestamp(),
-                  },
-                ],
-              }
-            : t
-        ),
-        activities: appendActivity(prev, `moved task to ${status}`, target.title, 'tasks', target.clientId),
-      };
-    });
-    addToast(`Task moved to ${status}`);
+    if (!firmUid) return;
+    const target = staffTasks.find((t) => t.id === id);
+    if (!target) return;
+    const nextTimeline = [
+      ...target.timeline,
+      {
+        id: makeId('tl'),
+        event: `Status changed to ${status}`,
+        actor: currentUser.name,
+        timestamp: nowTimestamp(),
+      },
+    ].slice(-50);
+
+    updateDoc(doc(db, 'firms', firmUid, 'staffTasks', id), {
+      status,
+      timeline: stripUndefined(nextTimeline),
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => {
+        void logActivity(`moved task to ${status}`, target.title, 'tasks', target.clientId);
+        addToast(`Task moved to ${status}`);
+      })
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/staffTasks/${id}`)
+      );
   };
 
   const addStaffTaskComment = (id: string, text: string) => {
-    setState((prev) => ({
-      ...prev,
-      staffTasks: prev.staffTasks.map((t) =>
-        t.id === id
-          ? {
-              ...t,
-              comments: [
-                ...t.comments,
-                { id: `tc-${Date.now()}`, author: currentUser.name, text, timestamp: nowTimestamp() },
-              ],
-            }
-          : t
-      ),
-    }));
-    addToast('Task comment added');
+    if (!firmUid) return;
+    const target = staffTasks.find((t) => t.id === id);
+    if (!target) return;
+    const nextComments = [
+      ...target.comments,
+      { id: makeId('tc'), author: currentUser.name, text, timestamp: nowTimestamp() },
+    ].slice(-50);
+
+    updateDoc(doc(db, 'firms', firmUid, 'staffTasks', id), {
+      comments: stripUndefined(nextComments),
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => addToast('Task comment added'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/staffTasks/${id}`)
+      );
   };
 
   const updateValidationIssue = (
@@ -813,35 +1324,42 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     status: ValidationIssue['status'],
     comment?: string
   ) => {
-    setState((prev) => {
-      const target = prev.validationIssues.find((v) => v.id === id);
-      return {
-        ...prev,
-        validationIssues: prev.validationIssues.map((v) =>
-          v.id === id
-            ? {
-                ...v,
-                status,
-                internalComments: comment
-                  ? [
-                      ...v.internalComments,
-                      {
-                        id: `vc-${Date.now()}`,
-                        author: currentUser.name,
-                        text: comment,
-                        timestamp: nowTimestamp(),
-                      },
-                    ]
-                  : v.internalComments,
-              }
-            : v
-        ),
-        activities: target
-          ? appendActivity(prev, `updated validation finding (${status})`, target.title, 'validation', target.clientId)
-          : prev.activities,
-      };
-    });
-    addToast(`Validation issue marked ${status}`);
+    if (!firmUid) return;
+    const target = validationIssues.find((v) => v.id === id);
+    if (!target) return;
+    const nextComments = comment
+      ? [
+          ...target.internalComments,
+          {
+            id: makeId('vc'),
+            author: currentUser.name,
+            text: comment,
+            timestamp: nowTimestamp(),
+          },
+        ].slice(-50)
+      : target.internalComments;
+
+    updateDoc(doc(db, 'firms', firmUid, 'validationIssues', id), {
+      status,
+      internalComments: stripUndefined(nextComments),
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => {
+        void logActivity(
+          `updated validation finding (${status})`,
+          target.title,
+          'validation',
+          target.clientId
+        );
+        addToast(`Validation issue marked ${status}`);
+      })
+      .catch((err) =>
+        handleFirestoreError(
+          err,
+          OperationType.UPDATE,
+          `firms/${firmUid}/validationIssues/${id}`
+        )
+      );
   };
 
   const updateCrossComparison = (
@@ -849,123 +1367,202 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     varianceStatus: CrossDocumentComparison['varianceStatus'],
     notes?: string
   ) => {
-    setState((prev) => ({
-      ...prev,
-      crossComparisons: prev.crossComparisons.map((c) =>
-        c.id === id ? { ...c, varianceStatus, notes: notes ?? c.notes } : c
-      ),
-    }));
-    addToast('Cross-document review updated');
+    if (!firmUid) return;
+    const target = crossComparisons.find((c) => c.id === id);
+    updateDoc(doc(db, 'firms', firmUid, 'crossComparisons', id), {
+      varianceStatus,
+      notes: notes ?? target?.notes ?? '',
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => addToast('Cross-document review updated'))
+      .catch((err) =>
+        handleFirestoreError(
+          err,
+          OperationType.UPDATE,
+          `firms/${firmUid}/crossComparisons/${id}`
+        )
+      );
   };
 
   const markNotificationRead = (id: string, read = true) => {
-    setState((prev) => ({
-      ...prev,
-      notifications: prev.notifications.map((n) => (n.id === id ? { ...n, read } : n)),
-    }));
+    if (!firmUid) return;
+    updateDoc(doc(db, 'firms', firmUid, 'notifications', id), {
+      read,
+      updatedAt: serverTimestamp(),
+    }).catch((err) =>
+      handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/notifications/${id}`)
+    );
   };
 
   const markAllNotificationsRead = () => {
-    setState((prev) => ({
-      ...prev,
-      notifications: prev.notifications.map((n) => ({ ...n, read: true })),
-    }));
-    addToast('All notifications marked read');
+    if (!firmUid) return;
+    const unread = notifications.filter((n) => !n.read);
+    if (unread.length === 0) return;
+    const batch = writeBatch(db);
+    unread.forEach((n) => {
+      batch.update(doc(db, 'firms', firmUid, 'notifications', n.id), {
+        read: true,
+        updatedAt: serverTimestamp(),
+      });
+    });
+    batch
+      .commit()
+      .then(() => addToast('All notifications marked read'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/notifications`)
+      );
   };
 
   const addReminder = (rem: Omit<ScheduledReminder, 'id'>) => {
-    const newRem: ScheduledReminder = { ...rem, id: `rem-${Date.now()}` };
-    setState((prev) => ({
-      ...prev,
-      reminders: [newRem, ...prev.reminders],
-      activities: appendActivity(prev, 'scheduled reminder', newRem.title, 'reminders', rem.clientId),
-    }));
-    addToast('Reminder scheduled (Simulated)', 'Note: Automated Email/WhatsApp requires backend integration.');
+    if (!firmUid) return;
+    const id = makeId('rem');
+    setDoc(
+      doc(db, 'firms', firmUid, 'reminders', id),
+      stripUndefined({
+        ...rem,
+        id,
+        ownerUid: firmUid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => {
+        void logActivity('scheduled reminder', rem.title, 'reminders', rem.clientId);
+        addToast(
+          'Reminder scheduled',
+          'Saved to Firestore. (External Email/WhatsApp dispatch requires messaging provider setup.)'
+        );
+      })
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.CREATE, `firms/${firmUid}/reminders/${id}`)
+      );
   };
 
   const triggerSimulatedReminder = (id: string) => {
-    setState((prev) => {
-      const rem = prev.reminders.find((r) => r.id === id);
-      if (!rem) return prev;
-      return {
-        ...prev,
-        reminders: prev.reminders.map((r) =>
-          r.id === id ? { ...r, status: 'Sent (Simulated)' as const } : r
-        ),
-        communications: [
-          {
-            id: `com-${Date.now()}`,
-            clientId: rem.clientId,
-            direction: 'Outbound (CA -> Client)',
-            channel: rem.channel === 'Portal Alert' ? 'Client Portal' : 'Email (Simulated)',
-            subject: rem.title,
-            message: rem.message,
-            sender: currentUser.name,
-            timestamp: nowTimestamp(),
-          },
-          ...prev.communications,
-        ],
-      };
+    if (!firmUid) return;
+    const rem = reminders.find((r) => r.id === id);
+    if (!rem) return;
+    const comId = makeId('com');
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'firms', firmUid, 'reminders', id), {
+      status: 'Sent (Simulated)',
+      updatedAt: serverTimestamp(),
     });
-    addToast('Simulated reminder logged', 'Recorded in client communication history.');
+    batch.set(
+      doc(db, 'firms', firmUid, 'communications', comId),
+      stripUndefined({
+        id: comId,
+        ownerUid: firmUid,
+        clientId: rem.clientId,
+        direction: 'Outbound (CA -> Client)',
+        channel: rem.channel === 'Portal Alert' ? 'Client Portal' : 'Email (Simulated)',
+        subject: rem.title,
+        message: rem.message,
+        sender: currentUser.name,
+        timestamp: nowTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+    batch
+      .commit()
+      .then(() => addToast('Simulated reminder logged', 'Recorded in Firestore communication history.'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/reminders/${id}`)
+      );
   };
 
   const addCommunication = (log: Omit<CommunicationLog, 'id' | 'timestamp'>) => {
-    setState((prev) => ({
-      ...prev,
-      communications: [
-        { ...log, id: `com-${Date.now()}`, timestamp: nowTimestamp() },
-        ...prev.communications,
-      ],
-    }));
-    addToast('Message recorded');
+    if (!firmUid) return;
+    const id = makeId('com');
+    setDoc(
+      doc(db, 'firms', firmUid, 'communications', id),
+      stripUndefined({
+        ...log,
+        id,
+        ownerUid: firmUid,
+        timestamp: nowTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => addToast('Message recorded'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.CREATE, `firms/${firmUid}/communications/${id}`)
+      );
   };
 
   const addFinancialRecord = (rec: Omit<FinancialSummaryRecord, 'id'>) => {
-    setState((prev) => ({
-      ...prev,
-      financialRecords: [{ ...rec, id: `fin-${Date.now()}` }, ...prev.financialRecords],
-      activities: appendActivity(
-        prev,
-        'saved extracted financial entry',
-        `${rec.month} (${rec.sourceType})`,
-        'financial',
-        rec.clientId
-      ),
-    }));
-    addToast('Saved to client records', 'Provisional extracted record added to Financial Overview.');
+    if (!firmUid) return;
+    const id = makeId('fin');
+    setDoc(
+      doc(db, 'firms', firmUid, 'financialRecords', id),
+      stripUndefined({
+        ...rec,
+        id,
+        ownerUid: firmUid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => {
+        void logActivity(
+          'saved extracted financial entry',
+          `${rec.month} (${rec.sourceType})`,
+          'financial',
+          rec.clientId
+        );
+        addToast(
+          'Saved to client records',
+          'Provisional extracted record saved to Firestore Financial Overview.'
+        );
+      })
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.CREATE, `firms/${firmUid}/financialRecords/${id}`)
+      );
   };
 
   const updateSettings = (patch: Partial<FirmSettings>) => {
-    setState((prev) => ({
-      ...prev,
-      settings: { ...prev.settings, ...patch },
-    }));
-    addToast('Settings saved');
+    if (!firmUid) return;
+    updateDoc(
+      doc(db, 'firms', firmUid),
+      stripUndefined({ ...patch, updatedAt: serverTimestamp() })
+    )
+      .then(() => addToast('Settings saved', 'Firm settings persisted to Firestore.'))
+      .catch((err) => handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}`));
   };
 
   const addEmployee = (emp: Omit<Employee, 'id' | 'avatarInitials'>) => {
-    const initials = emp.name
-      .replace(/^CA\s+/i, '')
-      .split(' ')
-      .map((p) => p[0])
-      .join('')
-      .slice(0, 2)
-      .toUpperCase();
-    const newEmp: Employee = { ...emp, id: `emp-${Date.now()}`, avatarInitials: initials };
-    setState((prev) => ({
-      ...prev,
-      employees: [...prev.employees, newEmp],
-    }));
-    addToast('Team member added', emp.name);
+    if (!firmUid) return;
+    const id = makeId('emp');
+    const initials = computeInitials(emp.name);
+    setDoc(
+      doc(db, 'firms', firmUid, 'employees', id),
+      stripUndefined({
+        ...emp,
+        id,
+        ownerUid: firmUid,
+        avatarInitials: initials,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => addToast('Team member added', emp.name))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.CREATE, `firms/${firmUid}/employees/${id}`)
+      );
   };
 
   const updateEmployee = (id: string, patch: Partial<Employee>) => {
-    setState((prev) => ({
-      ...prev,
-      employees: prev.employees.map((e) => (e.id === id ? { ...e, ...patch } : e)),
-    }));
-    addToast('Employee record updated');
+    if (!firmUid) return;
+    updateDoc(
+      doc(db, 'firms', firmUid, 'employees', id),
+      stripUndefined({ ...patch, updatedAt: serverTimestamp() })
+    )
+      .then(() => addToast('Employee record updated'))
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/employees/${id}`)
+      );
   };
 
   const updatePermission = (
@@ -973,25 +1570,28 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     field: keyof Omit<RolePermission, 'role'>,
     val: boolean
   ) => {
-    setState((prev) => ({
-      ...prev,
-      permissions: prev.permissions.map((p) => (p.role === role ? { ...p, [field]: val } : p)),
-    }));
-    addToast('Permissions updated', `${role} access matrix saved.`);
+    if (!firmUid) return;
+    const nextPermissions = permissions.map((p) => (p.role === role ? { ...p, [field]: val } : p));
+    updateDoc(doc(db, 'firms', firmUid), {
+      permissions: nextPermissions,
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => addToast('Permissions updated', `${role} access matrix saved to Firestore.`))
+      .catch((err) => handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}`));
   };
 
   const computeClientRiskScore = (clientId: string): ClientRiskScoreResult => {
-    const client = state.clients.find((c) => c.id === clientId);
+    const client = clients.find((c) => c.id === clientId);
     if (!client) {
       return { score: 0, level: 'Low Risk', factors: [] };
     }
     return calculateClientRiskScore(
       client,
-      state.documents,
-      state.complianceTasks,
-      state.validationIssues,
-      state.anomalies,
-      state.selectedFY
+      documents,
+      complianceTasks,
+      validationIssues,
+      anomalies,
+      selectedFY
     );
   };
 
@@ -1000,33 +1600,44 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     status: FinancialAnomaly['status'],
     caNote?: string
   ) => {
-    setState((prev) => {
-      const target = prev.anomalies.find((a) => a.id === id);
-      return {
-        ...prev,
-        anomalies: prev.anomalies.map((a) =>
-          a.id === id ? { ...a, status, caNote: caNote ?? a.caNote } : a
-        ),
-        activities: target
-          ? appendActivity(prev, `marked anomaly ${status}`, target.title, 'intelligence', target.clientId)
-          : prev.activities,
-      };
-    });
-    addToast(`Anomaly marked ${status}`);
+    if (!firmUid) return;
+    const target = anomalies.find((a) => a.id === id);
+    if (!target) return;
+    updateDoc(
+      doc(db, 'firms', firmUid, 'anomalies', id),
+      stripUndefined({
+        status,
+        caNote: caNote ?? target.caNote,
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => {
+        void logActivity(`marked anomaly ${status}`, target.title, 'intelligence', target.clientId);
+        addToast(`Anomaly marked ${status}`);
+      })
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.UPDATE, `firms/${firmUid}/anomalies/${id}`)
+      );
   };
 
   const escalateAnomalyToTask = (id: string) => {
-    setState((prev) => {
-      const anomaly = prev.anomalies.find((a) => a.id === id);
-      if (!anomaly) return prev;
-      const client = prev.clients.find((c) => c.id === anomaly.clientId);
-      const taskId = `tsk-anom-${Date.now()}`;
-      const newTask: StaffTask = {
+    if (!firmUid) return;
+    const anomaly = anomalies.find((a) => a.id === id);
+    if (!anomaly) return;
+    const client = clients.find((c) => c.id === anomaly.clientId);
+    const taskId = makeId('tsk-anom');
+    const actId = makeId('act');
+
+    const batch = writeBatch(db);
+    batch.set(
+      doc(db, 'firms', firmUid, 'staffTasks', taskId),
+      stripUndefined({
         id: taskId,
-        title: `CA Anomaly Review: ${anomaly.title}`,
+        ownerUid: firmUid,
+        title: `CA Anomaly Review: ${anomaly.title}`.slice(0, 200),
         description: `${anomaly.description}\nSource A: ${anomaly.sourceARef} (${anomaly.sourceAValue})\nSource B: ${anomaly.sourceBRef} (${anomaly.sourceBValue})`,
         clientId: anomaly.clientId,
-        assignedEmployeeId: client?.assignedEmployeeId || prev.currentEmployeeId,
+        assignedEmployeeId: client?.assignedEmployeeId || currentUser.id,
         createdBy: currentUser.name,
         priority: anomaly.severity === 'Critical' ? 'Urgent' : 'High',
         startDate: todayDate(),
@@ -1036,70 +1647,110 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         comments: [],
         timeline: [
           {
-            id: `tl-${Date.now()}`,
+            id: makeId('tl'),
             event: 'Auto-created from AI Financial Anomaly Detector',
             actor: currentUser.name,
             timestamp: nowTimestamp(),
           },
         ],
-      };
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
 
-      return {
-        ...prev,
-        staffTasks: [newTask, ...prev.staffTasks],
-        anomalies: prev.anomalies.map((a) =>
-          a.id === id ? { ...a, status: 'Task Created', linkedTaskId: taskId } : a
-        ),
-        activities: appendActivity(
-          prev,
-          'escalated anomaly to CA review task',
-          anomaly.title,
-          'tasks',
-          anomaly.clientId
-        ),
-      };
+    batch.update(doc(db, 'firms', firmUid, 'anomalies', id), {
+      status: 'Task Created',
+      linkedTaskId: taskId,
+      updatedAt: serverTimestamp(),
     });
-    addToast('CA Review Task Created', 'Anomaly linked to Tasks & Workflow board.');
+
+    batch.set(
+      doc(db, 'firms', firmUid, 'activities', actId),
+      stripUndefined({
+        id: actId,
+        ownerUid: firmUid,
+        clientId: anomaly.clientId,
+        actor: currentUser.name,
+        action: 'escalated anomaly to CA review task',
+        target: anomaly.title,
+        timestamp: nowTimestamp(),
+        section: 'tasks',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    batch
+      .commit()
+      .then(() =>
+        addToast('CA Review Task Created', 'Anomaly linked to Tasks & Workflow board in Firestore.')
+      )
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.WRITE, `firms/${firmUid}/anomalies/${id}`)
+      );
   };
 
   const addAnomaly = (anomaly: Omit<FinancialAnomaly, 'id' | 'detectedAt'>) => {
-    const newAnom: FinancialAnomaly = {
-      ...anomaly,
-      id: `anom-${Date.now()}`,
-      detectedAt: nowTimestamp(),
-    };
-    setState((prev) => ({
-      ...prev,
-      anomalies: [newAnom, ...prev.anomalies],
-      activities: appendActivity(
-        prev,
-        'flagged financial anomaly',
-        newAnom.title,
-        'intelligence',
-        newAnom.clientId
-      ),
-    }));
+    if (!firmUid) return;
+    const id = makeId('anom');
+    setDoc(
+      doc(db, 'firms', firmUid, 'anomalies', id),
+      stripUndefined({
+        ...anomaly,
+        id,
+        ownerUid: firmUid,
+        detectedAt: nowTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() =>
+        logActivity('flagged financial anomaly', anomaly.title, 'intelligence', anomaly.clientId)
+      )
+      .catch((err) =>
+        handleFirestoreError(err, OperationType.CREATE, `firms/${firmUid}/anomalies/${id}`)
+      );
   };
 
   const addCrossComparison = (comp: Omit<CrossDocumentComparison, 'id'>) => {
-    setState((prev) => ({
-      ...prev,
-      crossComparisons: [{ ...comp, id: `cc-${Date.now()}` }, ...prev.crossComparisons],
-      activities: appendActivity(
-        prev,
-        'added cross-document reconciliation',
-        comp.metric,
-        'intelligence',
-        comp.clientId
-      ),
-    }));
-    addToast('Reconciliation entry recorded', comp.metric);
+    if (!firmUid) return;
+    const id = makeId('cc');
+    setDoc(
+      doc(db, 'firms', firmUid, 'crossComparisons', id),
+      stripUndefined({
+        ...comp,
+        id,
+        ownerUid: firmUid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    )
+      .then(() => {
+        void logActivity(
+          'added cross-document reconciliation',
+          comp.metric,
+          'intelligence',
+          comp.clientId
+        );
+        addToast('Reconciliation entry recorded', comp.metric);
+      })
+      .catch((err) =>
+        handleFirestoreError(
+          err,
+          OperationType.CREATE,
+          `firms/${firmUid}/crossComparisons/${id}`
+        )
+      );
   };
 
-  const runDocumentToActionPipeline: PracticeContextValue['runDocumentToActionPipeline'] = (params) => {
-    const docId = `doc-${Date.now()}`;
+  const runDocumentToActionPipeline: PracticeContextValue['runDocumentToActionPipeline'] = (
+    params
+  ) => {
+    const docId = makeId('doc');
+    const taskId = makeId('tsk-pipe');
     const hasIssues = Boolean(params.detectedIssues && params.detectedIssues.length > 0);
-    const client = state.clients.find((c) => c.id === params.clientId);
+    const client = clients.find((c) => c.id === params.clientId);
+
     const newDoc: DocumentRecord = {
       id: docId,
       name: params.name,
@@ -1107,7 +1758,7 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       fileSize: params.fileSize,
       clientId: params.clientId,
       category: params.category,
-      financialYear: state.selectedFY,
+      financialYear: selectedFY,
       uploadedBy: currentUser.name,
       uploadedByRole: 'Staff',
       uploadDate: todayDate(),
@@ -1117,7 +1768,7 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       comments: [],
       history: [
         {
-          id: `h-${Date.now()}`,
+          id: makeId('h'),
           action: 'Uploaded & extracted via Document-to-Action Automation',
           actor: currentUser.name,
           timestamp: nowTimestamp(),
@@ -1125,125 +1776,202 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ],
     };
 
-    const taskId = `tsk-pipe-${Date.now()}`;
-    const reviewTask: StaffTask = {
-      id: taskId,
-      title: `CA Review: ${params.name} (${client?.name || 'Client'})`,
-      description: hasIssues
-        ? `Document-to-Action pipeline detected items requiring CA sign-off:\n• ${params.detectedIssues!.join('\n• ')}`
-        : `Extracted ${params.category} ready for CA verification and final sign-off.`,
-      clientId: params.clientId,
-      assignedEmployeeId: client?.assignedEmployeeId || currentUser.id,
-      createdBy: 'Document-to-Action Automation',
-      priority: hasIssues ? 'High' : 'Medium',
-      startDate: todayDate(),
-      dueDate: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10),
-      status: 'Under Review',
-      attachments: [params.name],
-      comments: [],
-      timeline: [
-        {
-          id: `tl-${Date.now()}`,
-          event: `Pipeline step: Upload → Extract → Validate (${params.detectedIssues?.length || 0} flags) → CA Review Task`,
+    if (firmUid) {
+      const batch = writeBatch(db);
+      batch.set(
+        doc(db, 'firms', firmUid, 'documents', docId),
+        stripUndefined({
+          ...newDoc,
+          ownerUid: firmUid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      batch.set(
+        doc(db, 'firms', firmUid, 'staffTasks', taskId),
+        stripUndefined({
+          id: taskId,
+          ownerUid: firmUid,
+          title: `CA Review: ${params.name} (${client?.name || 'Client'})`.slice(0, 200),
+          description: hasIssues
+            ? `Document-to-Action pipeline detected items requiring CA sign-off:\n• ${params.detectedIssues!.join('\n• ')}`
+            : `Extracted ${params.category} ready for CA verification and final sign-off.`,
+          clientId: params.clientId,
+          assignedEmployeeId: client?.assignedEmployeeId || currentUser.id,
+          createdBy: 'Document-to-Action Automation',
+          priority: hasIssues ? 'High' : 'Medium',
+          startDate: todayDate(),
+          dueDate: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10),
+          status: 'Under Review',
+          attachments: [params.name],
+          comments: [],
+          timeline: [
+            {
+              id: makeId('tl'),
+              event: `Pipeline step: Upload → Extract → Validate (${params.detectedIssues?.length || 0} flags) → CA Review Task`,
+              actor: currentUser.name,
+              timestamp: nowTimestamp(),
+            },
+          ],
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      (params.detectedIssues || []).forEach((issue, idx) => {
+        const anomId = makeId(`anom-pipe-${idx}`);
+        batch.set(
+          doc(db, 'firms', firmUid, 'anomalies', anomId),
+          stripUndefined({
+            id: anomId,
+            ownerUid: firmUid,
+            clientId: params.clientId,
+            documentId: docId,
+            type: 'Tax Calculation Variance',
+            severity: 'Warning',
+            title: `Extracted Check Flag — ${params.name}`.slice(0, 200),
+            description: issue,
+            sourceARef: params.name,
+            sourceAValue:
+              params.extractedMetrics?.totalAmount !== undefined
+                ? formatINR(params.extractedMetrics.totalAmount)
+                : 'Extracted',
+            sourceBRef: 'FinSight Automated Rule Check',
+            sourceBValue: 'CA Verification Required',
+            detectedAt: nowTimestamp(),
+            status: 'Task Created',
+            linkedTaskId: taskId,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          })
+        );
+      });
+
+      const actId = makeId('act');
+      batch.set(
+        doc(db, 'firms', firmUid, 'activities', actId),
+        stripUndefined({
+          id: actId,
+          ownerUid: firmUid,
+          clientId: params.clientId,
           actor: currentUser.name,
+          action: 'ran Document-to-Action automation',
+          target: `${params.name} → Task & ${params.detectedIssues?.length || 0} check(s)`,
           timestamp: nowTimestamp(),
-        },
-      ],
-    };
+          section: 'documents',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
 
-    const newAnomalies: FinancialAnomaly[] = (params.detectedIssues || []).map((issue, idx) => ({
-      id: `anom-pipe-${Date.now()}-${idx}`,
-      clientId: params.clientId,
-      documentId: docId,
-      type: 'Tax Calculation Variance',
-      severity: 'Warning',
-      title: `Extracted Check Flag — ${params.name}`,
-      description: issue,
-      sourceARef: params.name,
-      sourceAValue:
-        params.extractedMetrics?.totalAmount !== undefined
-          ? formatINR(params.extractedMetrics.totalAmount)
-          : 'Extracted',
-      sourceBRef: 'FinSight Automated Rule Check',
-      sourceBValue: 'CA Verification Required',
-      detectedAt: nowTimestamp(),
-      status: 'Task Created',
-      linkedTaskId: taskId,
-    }));
-
-    setState((prev) => ({
-      ...prev,
-      documents: [newDoc, ...prev.documents],
-      staffTasks: [reviewTask, ...prev.staffTasks],
-      anomalies: [...newAnomalies, ...prev.anomalies],
-      activities: appendActivity(
-        prev,
-        'ran Document-to-Action automation',
-        `${params.name} → Task & ${newAnomalies.length} check(s)`,
-        'documents',
-        params.clientId
-      ),
-      notifications: [
-        {
-          id: `ntf-pipe-${Date.now()}`,
-          title: `Document-to-Action Ready — ${client?.name || 'Client'}`,
+      const ntfId = makeId('ntf');
+      batch.set(
+        doc(db, 'firms', firmUid, 'notifications', ntfId),
+        stripUndefined({
+          id: ntfId,
+          ownerUid: firmUid,
+          title: `Document-to-Action Ready — ${client?.name || 'Client'}`.slice(0, 200),
           message: `${params.name} extracted, validated, and queued for CA Review.`,
           type: 'document',
           read: false,
           timestamp: nowTimestamp(),
           linkSection: 'tasks',
           clientId: params.clientId,
-        },
-        ...prev.notifications,
-      ],
-    }));
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+
+      batch
+        .commit()
+        .catch((err) =>
+          handleFirestoreError(err, OperationType.WRITE, `firms/${firmUid}/documents/${docId}`)
+        );
+    }
 
     addToast(
       'Document-to-Action Executed',
-      `Saved ${params.name}, logged ${newAnomalies.length} flag(s), and created CA review task.`
+      `Saved ${params.name}, logged ${params.detectedIssues?.length || 0} flag(s), and created CA review task.`
     );
     return { doc: newDoc, createdTaskId: taskId };
   };
 
   const resetDemoData = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    setState({
-      clients: SEED_CLIENTS,
-      documents: SEED_DOCUMENTS,
-      complianceTasks: SEED_COMPLIANCE,
-      staffTasks: SEED_STAFF_TASKS,
-      docRequests: SEED_DOC_REQUESTS,
-      notifications: SEED_NOTIFICATIONS,
-      reminders: SEED_REMINDERS,
-      communications: SEED_COMMUNICATIONS,
-      validationIssues: SEED_VALIDATION_ISSUES,
-      crossComparisons: SEED_CROSS_COMPARISONS,
-      financialRecords: SEED_FINANCIAL_RECORDS,
-      anomalies: SEED_ANOMALIES,
-      activities: SEED_ACTIVITIES,
-      employees: SEED_EMPLOYEES,
-      permissions: SEED_PERMISSIONS,
-      settings: SEED_FIRM_SETTINGS,
-      selectedFY: 'FY 2026-27',
-      currentEmployeeId: 'emp-1',
-      previewClientId: 'cli-1',
-    });
-    addToast('Demo workspace reset', 'All sample data for A Y & COMPANY restored.', 'info');
+    if (!firmUid) return;
+    const subCollections = [
+      'clients',
+      'documents',
+      'complianceTasks',
+      'staffTasks',
+      'docRequests',
+      'notifications',
+      'reminders',
+      'communications',
+      'validationIssues',
+      'crossComparisons',
+      'financialRecords',
+      'anomalies',
+      'activities',
+    ];
+
+    void (async () => {
+      try {
+        const batch = writeBatch(db);
+        for (const colName of subCollections) {
+          const snap = await getDocs(
+            query(collection(db, 'firms', firmUid, colName), where('ownerUid', '==', firmUid))
+          );
+          snap.docs.forEach((d) => batch.delete(d.ref));
+        }
+        await batch.commit();
+        addToast(
+          'Workspace cleared',
+          'All practice collections cleared from Firestore. Firm settings and staff profile preserved.',
+          'info'
+        );
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `firms/${firmUid}`);
+      }
+    })();
   };
 
   const logoutDemoSession = () => {
-    setDemoLocked(true);
-    addToast('Demo session locked', 'Select a role to resume FinSight preview.', 'info');
+    void signOutUser();
   };
 
   const unlockDemoSession = () => {
-    setDemoLocked(false);
+    void signInWithGoogle();
   };
 
   return (
     <PracticeContext.Provider
       value={{
-        ...state,
+        authReady,
+        firebaseUser,
+        authError,
+        firestoreReady,
+        signInWithGoogle,
+        signOutUser,
+        clients,
+        documents,
+        complianceTasks,
+        staffTasks,
+        docRequests,
+        notifications,
+        reminders,
+        communications,
+        validationIssues,
+        crossComparisons,
+        financialRecords,
+        anomalies,
+        activities,
+        employees,
+        permissions,
+        settings,
+        selectedFY,
+        currentEmployeeId,
+        previewClientId,
         activeSection,
         setActiveSection,
         selectedClientId,
@@ -1257,9 +1985,9 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         addToast,
         dismissToast,
         currentUser,
-        setCurrentEmployeeId: (id) => setState((prev) => ({ ...prev, currentEmployeeId: id })),
-        setSelectedFY: (fy) => setState((prev) => ({ ...prev, selectedFY: fy })),
-        setPreviewClientId: (clientId) => setState((prev) => ({ ...prev, previewClientId: clientId })),
+        setCurrentEmployeeId,
+        setSelectedFY,
+        setPreviewClientId,
         isDemoClientMode,
         setIsDemoClientMode,
         globalSearchQuery,
@@ -1280,6 +2008,7 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         addCrossComparison,
         runDocumentToActionPipeline,
         addClient,
+        addClientAsync,
         updateClient,
         setClientStatus,
         addDocument,
@@ -1308,7 +2037,7 @@ export const PracticeProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updatePermission,
         resetDemoData,
         logoutDemoSession,
-        demoLocked,
+        demoLocked: !firebaseUser,
         unlockDemoSession,
       }}
     >
@@ -1460,4 +2189,3 @@ export function calculateClientRiskScore(
 
   return { score, level, factors };
 }
-

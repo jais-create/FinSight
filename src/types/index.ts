@@ -386,8 +386,15 @@ export interface ExtractedDocumentPayload {
   detectedCategory: DocumentCategory;
   partyName: string;
   counterpartyName?: string;
+  inferredEntityType?: ClientType;
   pan?: string;
   gstin?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  pinCode?: string;
   invoiceOrRefNo: string;
   documentDate: string;
   period?: string;
@@ -402,3 +409,15 @@ export interface ExtractedDocumentPayload {
   executiveBriefing: string;
 }
 
+export type CopilotActionType =
+  | 'create_client'
+  | 'log_document'
+  | 'create_compliance_task'
+  | 'create_staff_task'
+  | 'draft_reminder';
+
+export interface CopilotProposedAction {
+  id: string;
+  name: CopilotActionType;
+  args: Record<string, unknown>;
+}

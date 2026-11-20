@@ -47,7 +47,7 @@ export const Sidebar: React.FC<{ onOpenProfileModal: () => void }> = ({
     anomalies,
     currentUser,
     settings,
-    logoutDemoSession,
+    signOutUser,
     setCopilotOpen,
   } = usePractice();
 
@@ -243,12 +243,12 @@ export const Sidebar: React.FC<{ onOpenProfileModal: () => void }> = ({
 
           <button
             type="button"
-            onClick={logoutDemoSession}
-            title={sidebarCollapsed ? 'Logout (Demo)' : undefined}
+            onClick={() => void signOutUser()}
+            title={sidebarCollapsed ? 'Sign Out' : undefined}
             className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-slate-400 hover:text-rose-300 hover:bg-[#0E1A30] transition-colors whitespace-nowrap"
           >
             <LogOut className="w-4 h-4 shrink-0" />
-            {!sidebarCollapsed && <span>Logout</span>}
+            {!sidebarCollapsed && <span>Sign Out</span>}
           </button>
         </div>
       </aside>

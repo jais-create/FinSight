@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Search,
   Plus,
@@ -22,7 +22,7 @@ import {
   maskIdentifier,
   usePractice,
 } from '../context/PracticeContext';
-import { SMART_ONBOARDING_CHECKLISTS } from '../data/seedData';
+import { SMART_ONBOARDING_CHECKLISTS } from '../data/practiceDefaults';
 import {
   Client,
   ClientStatus,
@@ -96,11 +96,17 @@ export const ClientsPage: React.FC = () => {
   const [fServices, setFServices] = useState(
     SMART_ONBOARDING_CHECKLISTS['Private Limited'].defaultServices.join(', ')
   );
-  const [fEmp, setFEmp] = useState(employees[0]?.id || 'emp-1');
+  const [fEmp, setFEmp] = useState(employees[0]?.id || currentUser.id);
   const [fOnboard, setFOnboard] = useState(new Date().toISOString().slice(0, 10));
   const [fNotes, setFNotes] = useState('');
   const [fStatus, setFStatus] = useState<ClientStatus>('Active');
   const [formError, setFormError] = useState('');
+
+  useEffect(() => {
+    if (!fEmp || !employees.some((e) => e.id === fEmp)) {
+      setFEmp(employees[0]?.id || currentUser.id);
+    }
+  }, [employees, currentUser.id, fEmp]);
 
   const handleTypeChange = (nextType: ClientType) => {
     setFType(nextType);
@@ -125,7 +131,7 @@ export const ClientsPage: React.FC = () => {
     setFTan('');
     setFFy(selectedFY);
     setFServices(SMART_ONBOARDING_CHECKLISTS['Private Limited'].defaultServices.join(', '));
-    setFEmp(employees[0]?.id || 'emp-1');
+    setFEmp(employees[0]?.id || currentUser.id);
     setFOnboard(new Date().toISOString().slice(0, 10));
     setFNotes('');
     setFStatus('Active');

@@ -8,6 +8,8 @@ import { FinSightCopilotDrawer } from './components/copilot/FinSightCopilotDrawe
 import { ToastContainer } from './components/ui/ToastContainer';
 import { Modal } from './components/ui/Modal';
 
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
+
 import { DashboardPage } from './pages/DashboardPage';
 import { IntelligencePage } from './pages/IntelligencePage';
 import { ClientsPage } from './pages/ClientsPage';
@@ -28,15 +30,18 @@ const AppShell: React.FC = () => {
     activeSection,
     setActiveSection,
     currentUser,
-    employees,
-    setCurrentEmployeeId,
-    demoLocked,
-    unlockDemoSession,
+    authReady,
+    firebaseUser,
+    authError,
+    firestoreReady,
+    signInWithGoogle,
+    signOutUser,
     settings,
   } = usePractice();
 
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
 
   useEffect(() => {
     const handleGlobalKey = (e: KeyboardEvent) => {
@@ -49,7 +54,28 @@ const AppShell: React.FC = () => {
     return () => window.removeEventListener('keydown', handleGlobalKey);
   }, []);
 
-  if (demoLocked) {
+  if (!authReady || (firebaseUser && !firestoreReady)) {
+    return (
+      <div className="min-h-screen bg-[#050A14] flex items-center justify-center p-4">
+        <div className="w-full max-w-sm bg-[#0B1426] border border-[#1E2E4E] rounded-xl p-6 space-y-4 shadow-2xl text-center">
+          <span className="w-10 h-10 mx-auto rounded-lg bg-teal-600 text-white font-display font-bold flex items-center justify-center">
+            FS
+          </span>
+          <div className="space-y-1">
+            <h1 className="text-base font-bold text-slate-100 font-display">FinSight</h1>
+            <p className="text-xs text-slate-400">
+              {!authReady
+                ? 'Checking authentication session...'
+                : 'Connecting to Cloud Firestore workspace...'}
+            </p>
+          </div>
+          <div className="w-6 h-6 mx-auto border-2 border-teal-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      </div>
+    );
+  }
+
+  if (!firebaseUser) {
     return (
       <div className="min-h-screen bg-[#050A14] flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-[#0B1426] border border-[#1E2E4E] rounded-xl p-6 space-y-5 shadow-2xl">
@@ -65,31 +91,46 @@ const AppShell: React.FC = () => {
             </div>
           </div>
 
-          <p className="text-xs text-slate-300">
-            Session locked. Select a staff profile below to resume the FinSight workspace.
-          </p>
-
-          <div className="space-y-2">
-            {employees.map((emp) => (
-              <button
-                key={emp.id}
-                type="button"
-                onClick={() => {
-                  setCurrentEmployeeId(emp.id);
-                  unlockDemoSession();
-                }}
-                className="w-full px-3.5 py-2.5 text-left bg-[#081020] border border-[#1D2D4C] rounded-lg hover:border-teal-500 hover:bg-[#111E38] flex items-center justify-between transition-colors"
-              >
-                <div>
-                  <div className="text-xs font-semibold text-slate-100">{emp.name}</div>
-                  <div className="text-[11px] text-slate-400">
-                    {emp.role} · {emp.department}
-                  </div>
-                </div>
-                <span className="text-xs font-medium text-teal-400">Resume</span>
-              </button>
-            ))}
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold text-slate-100 font-display">
+              Sign in to Practice Workspace
+            </h2>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Sign in with your Google account to access your firm&apos;s Cloud Firestore compliance records, clients, documents, and AI workflows.
+            </p>
           </div>
+
+          {authError && (
+            <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
+              {authError}
+            </div>
+          )}
+
+          <button
+            type="button"
+            disabled={signingIn}
+            onClick={async () => {
+              setSigningIn(true);
+              try {
+                await signInWithGoogle();
+              } finally {
+                setSigningIn(false);
+              }
+            }}
+            className="w-full px-4 py-2.5 text-sm font-semibold text-white bg-teal-600 hover:bg-teal-500 disabled:opacity-60 rounded-lg flex items-center justify-center gap-2.5 transition-colors shadow-lg shadow-teal-950/40"
+          >
+            <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M21.35 11.1h-9.17v2.73h6.51c-.33 3.81-3.5 5.44-6.5 5.44C8.36 19.27 5 16.25 5 12c0-4.1 3.2-7.27 7.2-7.27 3.09 0 4.9 1.97 4.9 1.97L19 4.72S16.56 2 12.1 2C6.42 2 2.03 6.8 2.03 12c0 5.05 4.13 10 10.22 10 5.35 0 9.25-3.67 9.25-9.09 0-1.15-.15-1.81-.15-1.81z"
+              />
+            </svg>
+            <span>{signingIn ? 'Signing in...' : 'Continue with Google'}</span>
+          </button>
+
+          <p className="text-[11px] text-slate-500 text-center">
+            Secured by Firebase Authentication &amp; Cloud Firestore Rules
+          </p>
         </div>
       </div>
     );
@@ -173,11 +214,21 @@ const AppShell: React.FC = () => {
             </div>
             <div>
               <dt className="text-slate-400">Phone</dt>
-              <dd className="font-mono text-slate-100 mt-0.5">{currentUser.phone}</dd>
+              <dd className="font-mono text-slate-100 mt-0.5">{currentUser.phone || 'Not set'}</dd>
             </div>
           </dl>
 
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setProfileModalOpen(false);
+                void signOutUser();
+              }}
+              className="px-4 py-2 text-xs font-medium text-rose-300 bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 rounded-lg"
+            >
+              Sign Out
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -197,8 +248,10 @@ const AppShell: React.FC = () => {
 
 export default function App() {
   return (
-    <PracticeProvider>
-      <AppShell />
-    </PracticeProvider>
+    <ErrorBoundary>
+      <PracticeProvider>
+        <AppShell />
+      </PracticeProvider>
+    </ErrorBoundary>
   );
 }

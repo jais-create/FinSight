@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Modal } from '../ui/Modal';
 import { usePractice } from '../../context/PracticeContext';
-import { SMART_ONBOARDING_CHECKLISTS } from '../../data/seedData';
+import { SMART_ONBOARDING_CHECKLISTS } from '../../data/practiceDefaults';
 import {
   ClientType,
   ComplianceType,
@@ -27,6 +27,7 @@ export const QuickAddModal: React.FC = () => {
     addComplianceTask,
     addStaffTask,
     addReminder,
+    addToast,
   } = usePractice();
 
   const [tab, setTab] = useState<QuickAddTab>('client');
@@ -42,34 +43,49 @@ export const QuickAddModal: React.FC = () => {
   const [cPhone, setCPhone] = useState('');
   const [cPan, setCPan] = useState('');
   const [cGstin, setCGstin] = useState('');
-  const [cEmp, setCEmp] = useState(employees[0]?.id || 'emp-1');
+  const [cEmp, setCEmp] = useState(employees[0]?.id || currentUser.id);
 
   // Document state
-  const [dClient, setDClient] = useState(clients[0]?.id || 'cli-1');
+  const [dClient, setDClient] = useState(clients[0]?.id || '');
   const [dName, setDName] = useState('');
   const [dCat, setDCat] = useState<DocumentCategory>('Bank Statements');
   const [dFy, setDFy] = useState<FinancialYear>(selectedFY);
 
   // Compliance state
-  const [cmpClient, setCmpClient] = useState(clients[0]?.id || 'cli-1');
+  const [cmpClient, setCmpClient] = useState(clients[0]?.id || '');
   const [cmpType, setCmpType] = useState<ComplianceType>('GSTR-3B');
   const [cmpTitle, setCmpTitle] = useState('');
   const [cmpDue, setCmpDue] = useState('2026-11-25');
-  const [cmpEmp, setCmpEmp] = useState(employees[1]?.id || 'emp-2');
+  const [cmpEmp, setCmpEmp] = useState(employees[0]?.id || currentUser.id);
   const [cmpPrio, setCmpPrio] = useState<PriorityLevel>('High');
 
   // Staff Task state
   const [tTitle, setTTitle] = useState('');
-  const [tClient, setTClient] = useState(clients[0]?.id || 'cli-1');
-  const [tEmp, setTEmp] = useState(employees[1]?.id || 'emp-2');
+  const [tClient, setTClient] = useState(clients[0]?.id || '');
+  const [tEmp, setTEmp] = useState(employees[0]?.id || currentUser.id);
   const [tDue, setTDue] = useState('2026-11-22');
   const [tPrio, setTPrio] = useState<PriorityLevel>('Medium');
 
   // Reminder state
-  const [rClient, setRClient] = useState(clients[0]?.id || 'cli-1');
+  const [rClient, setRClient] = useState(clients[0]?.id || '');
   const [rTitle, setRTitle] = useState('');
   const [rDate, setRDate] = useState('2026-11-19 10:00');
   const [rMsg, setRMsg] = useState('');
+
+  useEffect(() => {
+    const defaultClient = clients[0]?.id || '';
+    if (!dClient || !clients.some((c) => c.id === dClient)) setDClient(defaultClient);
+    if (!cmpClient || !clients.some((c) => c.id === cmpClient)) setCmpClient(defaultClient);
+    if (!tClient || !clients.some((c) => c.id === tClient)) setTClient(defaultClient);
+    if (!rClient || !clients.some((c) => c.id === rClient)) setRClient(defaultClient);
+  }, [clients, dClient, cmpClient, tClient, rClient]);
+
+  useEffect(() => {
+    const defaultEmp = employees[0]?.id || currentUser.id;
+    if (!cEmp || !employees.some((e) => e.id === cEmp)) setCEmp(defaultEmp);
+    if (!cmpEmp || !employees.some((e) => e.id === cmpEmp)) setCmpEmp(defaultEmp);
+    if (!tEmp || !employees.some((e) => e.id === tEmp)) setTEmp(defaultEmp);
+  }, [employees, currentUser.id, cEmp, cmpEmp, tEmp]);
 
   const onboardingPreview = SMART_ONBOARDING_CHECKLISTS[cType];
 
@@ -81,7 +97,7 @@ export const QuickAddModal: React.FC = () => {
         name: cName.trim(),
         type: cType,
         dobOrIncDate: '2022-04-01',
-        email: cEmail.trim() || 'contact@demo-client.in',
+        email: cEmail.trim() || 'contact@client.in',
         phone: cPhone.trim() || '+91 98290 00000',
         address: 'MI Road',
         city: 'Jaipur',
@@ -91,7 +107,7 @@ export const QuickAddModal: React.FC = () => {
         gstin: cGstin.trim().toUpperCase() || undefined,
         financialYear: selectedFY,
         services: onboardingPreview.defaultServices,
-        assignedEmployeeId: cEmp,
+        assignedEmployeeId: cEmp || currentUser.id,
         onboardingDate: new Date().toISOString().slice(0, 10),
         notes: 'Onboarded via Smart Client Onboarding (Quick Add).',
         status: 'Active',
@@ -101,6 +117,10 @@ export const QuickAddModal: React.FC = () => {
       setCPan('');
       setCGstin('');
     } else if (tab === 'document') {
+      if (!dClient) {
+        addToast('Client required', 'Onboard a client first before logging documents.', 'warning');
+        return;
+      }
       if (!dName.trim()) return;
       addDocument({
         name: dName.trim(),
@@ -112,10 +132,14 @@ export const QuickAddModal: React.FC = () => {
         uploadedBy: currentUser.name,
         uploadedByRole: 'Staff',
         status: 'Pending Review',
-        previewSummary: `Demo document entry (${dCat}) created via Quick Add.`,
+        previewSummary: `Document entry (${dCat}) created via Quick Add.`,
       });
       setDName('');
     } else if (tab === 'compliance') {
+      if (!cmpClient) {
+        addToast('Client required', 'Onboard a client first before adding compliance tasks.', 'warning');
+        return;
+      }
       if (!cmpTitle.trim()) return;
       addComplianceTask({
         title: cmpTitle.trim(),
@@ -123,7 +147,7 @@ export const QuickAddModal: React.FC = () => {
         type: cmpType,
         financialYear: selectedFY,
         dueDate: cmpDue,
-        assignedEmployeeId: cmpEmp,
+        assignedEmployeeId: cmpEmp || currentUser.id,
         status: 'Not Started',
         priority: cmpPrio,
         description: 'Created via Quick Add.',
@@ -133,12 +157,16 @@ export const QuickAddModal: React.FC = () => {
       });
       setCmpTitle('');
     } else if (tab === 'task') {
+      if (!tClient) {
+        addToast('Client required', 'Onboard a client first before creating staff tasks.', 'warning');
+        return;
+      }
       if (!tTitle.trim()) return;
       addStaffTask({
         title: tTitle.trim(),
         description: 'Created via Quick Add.',
         clientId: tClient,
-        assignedEmployeeId: tEmp,
+        assignedEmployeeId: tEmp || currentUser.id,
         createdBy: currentUser.name,
         priority: tPrio,
         startDate: new Date().toISOString().slice(0, 10),
@@ -148,6 +176,10 @@ export const QuickAddModal: React.FC = () => {
       });
       setTTitle('');
     } else if (tab === 'reminder') {
+      if (!rClient) {
+        addToast('Client required', 'Onboard a client first before scheduling reminders.', 'warning');
+        return;
+      }
       if (!rTitle.trim()) return;
       addReminder({
         title: rTitle.trim(),
@@ -173,7 +205,7 @@ export const QuickAddModal: React.FC = () => {
       open={quickAddOpen}
       onClose={() => setQuickAddOpen(false)}
       title="Quick Add Record"
-      subtitle="Create a new practice entry saved to local workspace storage"
+      subtitle="Create a new practice entry saved to your Cloud Firestore workspace"
     >
       <div className="flex flex-wrap gap-1 p-1 bg-[#081020] border border-[#192845] rounded-lg mb-5">
         {(

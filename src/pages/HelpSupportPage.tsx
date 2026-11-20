@@ -79,7 +79,7 @@ export const HelpSupportPage: React.FC = () => {
             Workspace Persistence &amp; Firm Support Desk
           </h2>
           <p className="text-xs text-slate-300 leading-relaxed">
-            Workspace changes persist locally in browser storage and can be restored anytime in Settings.
+            Workspace changes persist automatically in Google Cloud Firestore and can be managed anytime in Settings.
             {' '}
             {settings.firmName} · {settings.address}, {settings.city}, {settings.state} -{' '}
             {settings.pinCode}
@@ -94,7 +94,7 @@ export const HelpSupportPage: React.FC = () => {
               onClick={() => setActiveSection('settings')}
               className="inline-flex items-center gap-1 text-xs font-medium text-teal-400 hover:underline"
             >
-              Manage Demo Reset <ArrowRight className="w-3.5 h-3.5" />
+              Manage Workspace Settings <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>

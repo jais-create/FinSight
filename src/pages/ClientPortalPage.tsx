@@ -47,38 +47,38 @@ export const ClientPortalPage: React.FC = () => {
   const [editAddress, setEditAddress] = useState('');
 
   const client = useMemo(
-    () => clients.find((c) => c.id === previewClientId) || clients[0],
+    () => clients.find((c) => c.id === previewClientId) || clients[0] || null,
     [clients, previewClientId]
   );
 
   const clientDocs = useMemo(
-    () => documents.filter((d) => d.clientId === client.id),
-    [documents, client.id]
+    () => (client ? documents.filter((d) => d.clientId === client.id) : []),
+    [documents, client]
   );
 
   const clientRequests = useMemo(
-    () => docRequests.filter((r) => r.clientId === client.id),
-    [docRequests, client.id]
+    () => (client ? docRequests.filter((r) => r.clientId === client.id) : []),
+    [docRequests, client]
   );
 
   const clientCompliance = useMemo(
-    () => complianceTasks.filter((c) => c.clientId === client.id),
-    [complianceTasks, client.id]
+    () => (client ? complianceTasks.filter((c) => c.clientId === client.id) : []),
+    [complianceTasks, client]
   );
 
   const clientMissing = useMemo(
-    () => computeMissingDocsForClient(client, documents, selectedFY),
+    () => (client ? computeMissingDocsForClient(client, documents, selectedFY) : []),
     [client, documents, selectedFY]
   );
 
   const clientComms = useMemo(
-    () => communications.filter((c) => c.clientId === client.id),
-    [communications, client.id]
+    () => (client ? communications.filter((c) => c.clientId === client.id) : []),
+    [communications, client]
   );
 
   const clientNotifs = useMemo(
-    () => notifications.filter((n) => n.clientId === client.id).slice(0, 4),
-    [notifications, client.id]
+    () => (client ? notifications.filter((n) => n.clientId === client.id).slice(0, 4) : []),
+    [notifications, client]
   );
 
   const authorizedReports = useMemo(
@@ -94,6 +94,29 @@ export const ClientPortalPage: React.FC = () => {
       ),
     [clientDocs]
   );
+
+  if (!client) {
+    return (
+      <div className="bg-[#0B1426] border border-[#1E2E4E] rounded-xl p-8 text-center space-y-3 max-w-xl mx-auto mt-8">
+        <Info className="w-7 h-7 text-teal-400 mx-auto" />
+        <h2 className="text-base font-bold text-slate-100 font-display">
+          No Clients Available for Portal Preview
+        </h2>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          Your Cloud Firestore workspace currently has no onboarded clients. Add a client first to preview their document checklist, uploads, and compliance status here.
+        </p>
+        <div className="pt-2">
+          <button
+            type="button"
+            onClick={() => setActiveSection('clients')}
+            className="px-4 py-2 text-xs font-medium text-white bg-teal-600 hover:bg-teal-500 rounded-lg"
+          >
+            Go to Clients &amp; Onboard
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Sample workflow state detection
   const bankReq = clientRequests.find((r) => r.category === 'Bank Statements');
@@ -138,12 +161,12 @@ export const ClientPortalPage: React.FC = () => {
   };
 
   const handleDownloadReport = (docName: string) => {
-    const text = `Authorized Report Copy (Demo)\nIssued by: A Y & COMPANY, Chartered Accountants, Jaipur\nClient: ${client.name}\nDocument: ${docName}\nFinancial Year: ${selectedFY}`;
+    const text = `Authorized Report Copy\nIssued by: A Y & COMPANY, Chartered Accountants, Jaipur\nClient: ${client.name}\nDocument: ${docName}\nFinancial Year: ${selectedFY}`;
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${docName.replace(/\.[^.]+$/, '')}_authorized_demo.txt`;
+    a.download = `${docName.replace(/\.[^.]+$/, '')}_authorized.txt`;
     a.click();
     URL.revokeObjectURL(url);
     addToast('Report downloaded', docName);

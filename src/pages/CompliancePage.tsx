@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Calendar as CalendarIcon,
   List,
@@ -26,10 +26,12 @@ export const CompliancePage: React.FC = () => {
     documents,
     selectedFY,
     settings,
+    currentUser,
     addComplianceTask,
     updateComplianceTask,
     updateComplianceStatus,
     openClientProfile,
+    addToast,
   } = usePractice();
 
   const [viewMode, setViewMode] = useState<'calendar' | 'list'>('calendar');
@@ -42,15 +44,27 @@ export const CompliancePage: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
 
   // Create form state
-  const [cClient, setCClient] = useState(clients[0]?.id || 'cli-1');
+  const [cClient, setCClient] = useState(clients[0]?.id || '');
   const [cType, setCType] = useState<ComplianceType>('GSTR-3B');
   const [cTitle, setCTitle] = useState('');
   const [cFy, setCFy] = useState<FinancialYear>(selectedFY);
   const [cDue, setCDue] = useState('2026-11-25');
-  const [cEmp, setCEmp] = useState(employees[1]?.id || 'emp-2');
+  const [cEmp, setCEmp] = useState(employees[0]?.id || currentUser.id);
   const [cPrio, setCPrio] = useState<PriorityLevel>('High');
   const [cDesc, setCDesc] = useState('');
   const [cRemDays, setCRemDays] = useState(3);
+
+  useEffect(() => {
+    if (!cClient || !clients.some((c) => c.id === cClient)) {
+      setCClient(clients[0]?.id || '');
+    }
+  }, [clients, cClient]);
+
+  useEffect(() => {
+    if (!cEmp || !employees.some((e) => e.id === cEmp)) {
+      setCEmp(employees[0]?.id || currentUser.id);
+    }
+  }, [employees, currentUser.id, cEmp]);
 
   // Detail modal note
   const [progressNote, setProgressNote] = useState('');
@@ -103,6 +117,10 @@ export const CompliancePage: React.FC = () => {
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!cClient) {
+      addToast('Client required', 'Please onboard a client first before adding compliance tasks.', 'warning');
+      return;
+    }
     if (!cTitle.trim()) return;
     addComplianceTask({
       title: cTitle.trim(),
@@ -110,7 +128,7 @@ export const CompliancePage: React.FC = () => {
       type: cType,
       financialYear: cFy,
       dueDate: cDue,
-      assignedEmployeeId: cEmp,
+      assignedEmployeeId: cEmp || currentUser.id,
       status: 'Not Started',
       priority: cPrio,
       description: cDesc.trim() || `${cType} compliance filing.`,
